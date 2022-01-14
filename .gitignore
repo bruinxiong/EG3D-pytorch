@@ -1,0 +1,112 @@
+results/
+.idea/
+env.md
+datasets/
+~/
+# system ignore
+.DS_Store
+._.DS_Store
+Thumbs.db
+ 
+# temp file
+*.log
+*.cache
+*.diff
+*.patch
+*.tmp
+*.swap
+*.swp
+*.bk
+*.bak
+tmp*
+ 
+#Java from WangTianzhou
+*.class
+.idea/
+*.iml
+ 
+# Mobile Tools for Java (J2ME)
+.mtj.tmp/
+  
+#package file
+*.war
+*.ear
+*.zip
+*.tar.gz
+*.rar
+*.jar
+ 
+#maven ignore
+target/
+build/
+ 
+#eclipse ignore
+.settings/
+.project/
+.classpatch
+ 
+#Intellij idea
+.idea/
+/idea/
+*.ipr
+*.iml
+*.iws
+  
+ 
+# virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
+hs_err_pid*
+target/
+  
+ 
+.README.md.html
+ 
+pom.xml.releaseBackup
+release.properties
+ 
+# C++ from WengCiJie
+*.diff
+.classpath
+*.ipr
+*.iws
+*.ids
+.tags*
+build_info.properties
+*.pyc
+test.*
+/**/thrift-java/
+*.log
+release
+.DS_Store
+.checkstyle
+MANIFEST.MF
+deploy-lsd.sh
+bazel-*
+output
+cmake-build-debug
+tags
+bazel
+bin/bazel
+ 
+# Python from liyong
+*.egg
+*.egg-info
+*.pyc
+*.so
+*.tar.gz
+.cache
+.coverage
+.eggs
+.idea
+.mypy_cache
+.pytest_cache
+.python-version
+.tox
+.venv
+venv/
+.vscode
+MANIFEST
+__pycache__
+build/
+dist/
+htmlcov
+test/__pycache__
