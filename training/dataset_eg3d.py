@@ -112,13 +112,7 @@ class Dataset(torch.utils.data.Dataset):
     #         label = onehot
     #     return label.copy()
     def get_label(self, idx):
-        raw_idx = self._raw_idx[idx]
-        fname = self._image_fnames[raw_idx]
-        fname = os.path.basename(fname)
-        cond = self.cond_set[fname]
-        if self._xflip[idx]:  # 差点忘记要反转y轴
-            cond[1] *= -1.0
-        return cond
+        raise NotImplementedError
 
 
     # def get_details(self, idx):
@@ -185,13 +179,16 @@ class ImageFolderDataset(Dataset):
 
         self.cond_set = {}
         with open(cond_path, 'r') as f:
-            for line in f.readlines()[1:]:
+            # for line in f.readlines()[1:]:
+            for line_idx, line in enumerate(f):
+                if line_idx == 0: continue
                 line = line.strip()
                 img_path, y, x, z = line.split(' ')
                 y = float(y)
                 x = float(x)
                 z = float(z)  # TODO: z是否需要设置为0
-                self.cond_set[img_path] = torch.tensor([x, y, z]).float()
+                self.cond_set[img_path] = np.array([x, y, z])
+                # print(img_path, self.cond_set[img_path])
         assert len(self.cond_set) == 70000
         if os.path.isdir(self._path):
             self._type = 'dir'
@@ -268,6 +265,17 @@ class ImageFolderDataset(Dataset):
         labels = np.array(labels)
         labels = labels.astype({1: np.int64, 2: np.float32}[labels.ndim])
         return labels
+
+    def get_label(self, idx):
+        raw_idx = self._raw_idx[idx]
+        fname = self._image_fnames[raw_idx]
+        fname = os.path.basename(fname)
+        cond = self.cond_set[fname]
+        # cond = torch.tensor([0.0,0.0,0.0])
+        # if self._xflip[idx]:  # 差点忘记要反转y轴
+        #     cond[1] *= -1.0
+        assert self._xflip[idx] == 0  # 暂时不允许有x轴反转
+        return torch.from_numpy(cond).float()
 
 #----------------------------------------------------------------------------
 

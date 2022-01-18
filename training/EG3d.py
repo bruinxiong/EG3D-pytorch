@@ -4,6 +4,42 @@ from .networks_stylegan2 import *
 from torch import nn
 from .camera_utils import *
 from torch.nn import functional as F
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from glob import glob 
+
+
+@persistence.persistent_class
+class NerfMLP(nn.Module):
+    def __init__(self,):
+        super().__init__()
+        self.stem = nn.Linear(3, 32)
+
+        self.layers = nn.Sequential(
+            nn.Linear(64, 64),
+            nn.ReLU(),
+             nn.Linear(64, 64),
+            nn.ReLU(),
+             nn.Linear(64, 64),
+            nn.ReLU(),
+             nn.Linear(64, 64),
+            nn.ReLU(),
+             nn.Linear(64, 64),
+            nn.ReLU(),
+             nn.Linear(64, 64),
+            nn.ReLU(),
+        )
+        self.sigma = nn.Linear(64, 1)
+        self.rgb = nn.Linear(64, 32)
+    def forward(self, x):
+        x = self.stem(x) # 32
+        noise = torch.randn((x.shape[0], 32), device=x.device)
+        x = torch.cat([x, noise], dim=1) # b, 64
+        b = self.layers(x)
+        sigma = self.sigma(b)
+        rgb = self.rgb(b)
+        return torch.cat([rgb, sigma], dim=1)  # b, 33
+        
 
 @persistence.persistent_class
 class LightDecoder(nn.Module):
@@ -26,7 +62,7 @@ class SuperResolutionNet(nn.Module): # 简化计算量，只上采样一倍
     def __init__(self, 
             in_channels, w_dim, resolution, 
             img_channels=3,
-            use_fp16 = True,  # 根据论文描述，超分模块都使用FP16
+            use_fp16 = True, # True # 根据论文描述，超分模块都使用FP16,在GAN init中设置，不是在这
             channel_base=None,
             num_fp16_res=None,
             channel_max=None,
@@ -59,9 +95,16 @@ class SuperResolutionNet(nn.Module): # 简化计算量，只上采样一倍
             if is_last:
                 self.num_ws += block.num_torgb
             in_channels = channels_dict[idx]
+        # for debug
+        # self.const = torch.nn.Parameter(torch.randn([32, 128, 128])) 
 
     def forward(self, x, ws, **block_kwargs):
         img = None
+        # for debugger
+        # ****************************
+        # x = self.const
+        # x = x.unsqueeze(0).repeat([ws.shape[0], 1, 1, 1])
+        # ************************************************
         block_ws = []
         with torch.autograd.profiler.record_function('split_ws'):
             misc.assert_shape(ws, [None, self.num_ws, self.w_dim])
@@ -261,9 +304,11 @@ class Generator(torch.nn.Module):
         mapping_kwargs      = {},   # Arguments for MappingNetwork.
         init_point_kwargs   = {},
         nerf_decoder_kwargs      = {},
+        rank = None,
         **synthesis_kwargs,         # Arguments for SynthesisNetwork.
     ):        
         super().__init__()
+        self.rank = rank
         self.z_dim = z_dim
         self.c_dim = c_dim
         self.w_dim = w_dim
@@ -272,8 +317,12 @@ class Generator(torch.nn.Module):
         self.backbone_resolution = backbone_resolution
         # self.synthesis = Backbone(w_dim=w_dim, img_resolution=backbone_resolution, img_channels=96, **synthesis_kwargs)
         self.super_res = SuperResolutionNet(in_channels=nerf_decoder_kwargs['out_c'], w_dim=w_dim, resolution=img_resolution, 
-                use_fp16=True, **synthesis_kwargs)
-        self.synthesis = SynthesisNetwork(w_dim=w_dim, img_resolution=backbone_resolution, img_channels=img_channels, **synthesis_kwargs)
+                use_fp16=False, **synthesis_kwargs)
+        self.synthesis = SynthesisNetwork(
+                    w_dim=w_dim, img_resolution=backbone_resolution, 
+                    img_channels=img_channels,
+                    num_fp16_res=0,
+                     **synthesis_kwargs)
         self.num_ws = self.synthesis.num_ws + self.super_res.num_ws  
         self.mapping = MappingNetwork(z_dim=z_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, **mapping_kwargs)
         self.nerf_decoder = LightDecoder(**nerf_decoder_kwargs)
@@ -284,6 +333,8 @@ class Generator(torch.nn.Module):
         self.register_buffer('init_points', init_points)  # hw,n,3
         self.register_buffer('init_rays_d_cam', rays_d_cam) # hw,3
         self.register_buffer('init_z_vals', z_vals) # (HxW, n, 1)
+        # for debug
+        self.nerf_mlp = NerfMLP()
 
     def trans_c_to_matrix(self, c):
         bs = c.shape[0]
@@ -301,6 +352,13 @@ class Generator(torch.nn.Module):
             ws = self.mapping(z, c, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff, update_emas=update_emas)
         # print(ws.keys())
         backbone_feats = self.synthesis(ws[:, :self.synthesis.num_ws], update_emas=update_emas, **synthesis_kwargs)  # b,32*3,256,256
+        
+        # for debug
+        # ****************************************************************
+        # backbone_feats = torch.cat([backbone_feats, backbone_feats], dim=1)  # b,6,h,w
+        # return backbone_feats
+        # ****************************************************************
+        
         assert backbone_feats.shape[1] == 96
         feat_xy, feat_yz, feat_xz = backbone_feats.chunk(3, dim=1)  # b, 32, 256, 256
         nerf_channel = feat_xy.shape[1]  # 32
@@ -328,7 +386,25 @@ class Generator(torch.nn.Module):
         # 以世界坐标系的原点为中心，xyz的范围都在-1到1之间的三维区域内
         trans_points = torch.bmm(homo_world_matrix, homo_points.reshape(bs, -1, 4).permute(0, 2, 1))\
             .permute(0, 2, 1).reshape(bs, n_points, n_step, 4)[:, :, :, :3]
-        trans_points = trans_points / (self.d_range[1] - self.d_range[0]) * 2  # 3个维度坐标都在-1到1之间,有可能越界
+        trans_points = trans_points / 0.18 # (self.d_range[1] - self.d_range[0]) * 2  # 3个维度坐标都在-1到1之间,有可能越界
+        # print(trans_points.max(), trans_points.min())
+        # print(trans_points[0])
+        # if self.rank == 0:
+        #     fig = plt.figure()
+        #     p = points[0].detach().cpu().numpy()  # hw, n, 3
+        #     tp = trans_points[0].detach().cpu().numpy()
+        #     ax = fig.gca(projection='3d')
+        #     ax.plot(p[:, 0, 0], p[:, 0, 1], p[:, 0, 2],)
+        #     ax.plot(p[:, -1, 0], p[:, -1, 1], p[:, -1, 2],)
+        #     ax.plot(tp[:, 0, 0], tp[:, 0, 1], tp[:, 0, 2],)
+        #     ax.plot(tp[:, -1, 0], tp[:, -1, 1], tp[:, -1, 2],)
+        #     ax.plot(d_ray[:, 0], d_ray[:, 1], d_ray[:, 2])
+        #     ax.scatter([0], [0], [0])
+        #     ax.set_xlabel('x')
+        #     ax.set_ylabel('y')
+        #     ax.set_zlabel('z')
+        #     num_idx = len(glob('./*.png'))
+        #     plt.savefig(f'{num_idx}.png')
         trans_rays_d_cam = torch.bmm(
             homo_world_matrix[..., :3, :3],
             init_rays_d_cam.permute(0, 2, 1)) \
@@ -344,21 +420,24 @@ class Generator(torch.nn.Module):
             .permute(0, 2, 1) \
             .reshape(bs, n_points, 4)
         trans_ray_origins = trans_ray_origins[..., :3] # (bs, num_rays, 3)
-        # TODO: 确认新的初始点生成方法，可以确保转化到世界坐标系，值都在-1到1之间
-        # TODO:需要测试是否正确
-        # trans_points = self.adjust_trans_points(trans_points)  # -1, 1
-        # trans_points = (trans_points + 1) / 2.0  # 0-1
-        # proj_trans_points = trans_points * self.backbone_resolution  # b,hw,n,3
+        # nerf_feat = self.bilinear_sample_tri_plane(
+        #     trans_points,
+        #     feat_xy, feat_yz, feat_xz, 
+        #     )  # b,c,h,w,n
         
-        nerf_feat = self.bilinear_sample_tri_plane(
-            trans_points,
-            feat_xy, feat_yz, feat_xz, 
-            )  # b,c,h,w,n
-        
-        nerf_feat = nerf_feat.permute(0, 4, 1, 2, 3).reshape(bs*n_step, nerf_channel,\
-             self.nerf_resolution, self.nerf_resolution)
-        # 使用light-weight decoder得到不透明度和RGB feature
-        nerf_feat = self.nerf_decoder(nerf_feat)  # bs*n_step, c+1, h, w
+        # nerf_feat = nerf_feat.permute(0, 4, 1, 2, 3).reshape(bs*n_step, nerf_channel,\
+        #      self.nerf_resolution, self.nerf_resolution)
+        # # 使用light-weight decoder得到不透明度和RGB feature
+        # nerf_feat = self.nerf_decoder(nerf_feat)  # bs*n_step, c+1, h, w
+
+        # ***************************
+        # for debug
+        h = w = self.nerf_resolution
+        trans_points_tmp = trans_points.reshape(-1, 3)  # bs*hw*n, 3
+        nerf_feat = self.nerf_mlp(trans_points_tmp) # ..., 33
+        nerf_feat = nerf_feat.reshape(bs, h, w, n_step, 33).permute(0, 3,4, 1,2).reshape(bs*n_step, 33, h, w) # bs*n, 33, h,w
+        # ***************************
+
         # 第二次根据sigma密度采样
         h = w = self.nerf_resolution
         sigma = nerf_feat[:, -1, ...].reshape(bs, n_step, h, w).permute(0, 2, 3, 1).\
@@ -368,18 +447,27 @@ class Generator(torch.nn.Module):
         weight = weight.reshape(bs*n_points, n_step) + 1e-5 # rearrange(weights, "b hw s 1 -> (b hw) s") + 1e-5
         # # (bs, hw, n, 3), (# (b, hw, n, 1))
         fine_points, fine_z_vals = get_fine_points(weight, z_vals, trans_ray_origins, trans_rays_d_cam, n_step)
-        fine_nerf_feat = self.bilinear_sample_tri_plane(
-            fine_points,
-            feat_xy, feat_yz, feat_xz, 
-            )  # b,c,h,w,n
-        fine_nerf_feat = fine_nerf_feat.permute(0, 4, 1, 2, 3).reshape(bs*n_step, nerf_channel,
-                                        h, w)
-        fine_nerf_feat = self.nerf_decoder(fine_nerf_feat)  # bs*n_step, c+1, h, w
+        fine_points = fine_points / 0.18 # 忘记对fine point归一化了
+        # *****************
+        # for debug
+        fine_points_tmp = fine_points.reshape(-1, 3)  # b*hw*n, 3
+        fine_nerf_feat = self.nerf_mlp(fine_points_tmp) # ..., 33
+        fine_nerf_feat = fine_nerf_feat.reshape(bs, h, w, n_step, 33).permute(0, 3,4, 1,2).reshape(bs*n_step, 33, h, w) # bs*n, 33, h,w
+        # *****************
+
+        # fine_nerf_feat = self.bilinear_sample_tri_plane(
+        #     fine_points,
+        #     feat_xy, feat_yz, feat_xz, 
+        #     )  # b,c,h,w,n
+        # fine_nerf_feat = fine_nerf_feat.permute(0, 4, 1, 2, 3).reshape(bs*n_step, nerf_channel,
+                                        # h, w)
+        # fine_nerf_feat = self.nerf_decoder(fine_nerf_feat)  # bs*n_step, c+1, h, w
+
         volume_channel = nerf_feat.shape[1]
         nerf_feat = nerf_feat.reshape(bs, n_step, volume_channel, h, w).permute(0, 3,4,1,2).\
             reshape(bs, n_points, n_step, volume_channel)
         fine_nerf_feat = fine_nerf_feat.reshape(bs, n_step, volume_channel, h, w).permute(0, 3, 4,1,2).\
-            reshape(bs,n_points, n_step, volume_channel)
+            reshape(bs, n_points, n_step, volume_channel)
         nerf_feat = torch.cat([nerf_feat, fine_nerf_feat], dim=2) # bs, hw, 2n, c+1
         z_vals = torch.cat([z_vals, fine_z_vals], dim=2)  # bs, hw, 2n, 1
         _, indices = torch.sort(z_vals, dim=-2)  # (b, hw, 2n, 1)
@@ -388,18 +476,20 @@ class Generator(torch.nn.Module):
 
         # 开始volume rendering，这里直接使用CIPS3d的代码 # 需要好好阅读一下giffare，CIPS，GRAF的代码
         # 沿用CIPS的代码
+        # print(second_sample_noise_std)
         pixels_fea, _, _ = fancy_integration(nerf_feat, z_vals, noise_std=second_sample_noise_std)
         # 使用超分辨率模型，
         pixels_fea = pixels_fea.reshape(bs, h, w, volume_channel-1).permute(0, 3, 1, 2)# bs, 32, h, w
-        gen_low_img = pixels_fea[:, :3, ...] # bs,3,h,w
+        # gen_low_img = pixels_fea[:, :3, ...] # bs,3,h,w
         ws = ws[:, self.synthesis.num_ws:]  # 超分辨率的ws
         assert ws.shape[1] == self.super_res.num_ws
         gen_high_img = self.super_res(pixels_fea, ws,  **synthesis_kwargs)  # bs, 3, h ,w 
         assert gen_high_img.shape[-1] == 256
         # 拼接两张图像然后输出
-        scale_factor = gen_high_img.shape[-1] // gen_low_img.shape[-1]
-        gen_low_img = F.interpolate(gen_low_img, scale_factor=scale_factor, mode='bilinear')
-        gen_imgs = torch.cat([gen_high_img, gen_low_img], dim=1) # bs, 6, h, w
+        # scale_factor = gen_high_img.shape[-1] // gen_low_img.shape[-1]
+        # gen_low_img = F.interpolate(gen_low_img, scale_factor=scale_factor, mode='bilinear')
+        # for debug, 两个图像都是高分辨率
+        gen_imgs = torch.cat([gen_high_img, gen_high_img], dim=1) # bs, 6, h, w
         return gen_imgs
 
 
@@ -475,7 +565,7 @@ class EG3dDiscriminator(nn.Module):
         architecture        = 'resnet', # Architecture: 'orig', 'skip', 'resnet'.
         channel_base        = 32768,    # Overall multiplier for the number of channels.
         channel_max         = 512,      # Maximum number of channels in any layer.
-        num_fp16_res        = 4,        # Use FP16 for the N highest resolutions.
+        num_fp16_res        = 0, # 4        # Use FP16 for the N highest resolutions.
         conv_clamp          = 256,      # Clamp the output of convolution layers to +-X, None = disable clamping.
         cmap_dim            = None,     # Dimensionality of mapped conditioning label, None = default.
         block_kwargs        = {},       # Arguments for DiscriminatorBlock.

@@ -35,6 +35,7 @@ def setup_snapshot_image_grid(num=4, device=torch.device('cpu'),random_seed=0):
     gh = num  # np.clip(4320 // training_set.image_shape[1], 4, 32)
     
     yaws = torch.linspace(-20, 20, gw)
+    # yaws = torch.linspace(-1, 1, gw)
     conds = []
     for idx in range(gw):
         x = z = 0
@@ -98,7 +99,7 @@ def training_loop(
     ada_kimg                = 500,      # ADA adjustment speed, measured in how many kimg it takes for p to increase/decrease by one unit.
     total_kimg              = 25000,    # Total length of the training, measured in thousands of real images.
     kimg_per_tick           = 4,        # Progress snapshot interval.
-    image_snapshot_ticks    = 10,       # How often to save image snapshots? None = disable.
+    image_snapshot_ticks    = 1,       # How often to save image snapshots? None = disable.
     network_snapshot_ticks  = 50,       # How often to save network snapshots? None = disable.
     resume_pkl              = None,     # Network pickle to resume training from.
     resume_kimg             = 0,        # First kimg to report when resuming training.
@@ -123,7 +124,6 @@ def training_loop(
     training_set = dnnlib.util.construct_class_by_name(**training_set_kwargs) # subclass of training.dataset.Dataset
     training_set_sampler = misc.InfiniteSampler(dataset=training_set, rank=rank, num_replicas=num_gpus, seed=random_seed)
     training_set_iterator = iter(torch.utils.data.DataLoader(dataset=training_set, sampler=training_set_sampler, batch_size=batch_size//num_gpus, **data_loader_kwargs))
-    # TODO number_worker只有在设置为0才能使用dataloader。
     # dataloader = torch.utils.data.DataLoader(dataset=training_set, sampler=training_set_sampler, batch_size=batch_size//num_gpus, **data_loader_kwargs)
     # for a,b,c,d in dataloader:
     #     print(a.shape, b.shape, c.shape, d.shape)
@@ -140,11 +140,14 @@ def training_loop(
     # Construct networks.
     if rank == 0:
         print('Constructing networks...')
-    common_kwargs = dict(c_dim=12, img_resolution=training_set.resolution, 
-        img_channels=96,
+    common_kwargs = dict(c_dim= 12, #12, 
+        img_resolution=training_set.resolution, 
+        img_channels= 96,
         backbone_resolution=128,
+        rank=rank,
      )
-    common_kwargs_for_D = dict(c_dim=12, img_resolution=training_set.resolution, 
+    common_kwargs_for_D = dict(c_dim=12, #12, # 尝试一下D不用cond
+        img_resolution=training_set.resolution, 
         img_channels=6,
      )
     G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
@@ -162,7 +165,8 @@ def training_loop(
     # Print network summary tables.
     if rank == 0:
         z = torch.empty([batch_gpu, G.z_dim], device=device)
-        c = torch.empty([batch_gpu, G.c_dim], device=device)
+        # c = torch.empty([batch_gpu, G.c_dim], device=device)
+        c = torch.empty([batch_gpu, 12], device=device)
         meta_data = {'second_sample_noise_std': 0, 'noise_mode': 'const'}
         img = misc.print_module_summary(G, [z, c], **meta_data)
         misc.print_module_summary(D, [img, c])
@@ -331,8 +335,9 @@ def training_loop(
 
         # Perform maintenance tasks once per tick.
         done = (cur_nimg >= total_kimg * 1000)
+        
         if (not done) and (cur_tick != 0) and (cur_nimg < tick_start_nimg + kimg_per_tick * 1000):
-            continue
+            continue  # 每4000张样本之后才打印一次日志，才会增加一次cur_tick，所以batch_idx才是真正的global step
 
         # Print status line, accumulating the same information in training_stats.
         tick_end_time = time.time()
@@ -368,6 +373,7 @@ def training_loop(
             total_imgs = []
             for c in grid_c:
                 images = G_ema(z=grid_z, c=c, **meta_data)[:, :3]  # b,3,h,w
+                # images = G(z=grid_z, c=c, **meta_data)[:, :3]  # b,3,h,w
                 res = images.shape[-1]
                 # save_image_grid(images, os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
                 total_imgs.append(images)
@@ -394,15 +400,15 @@ def training_loop(
                     pickle.dump(snapshot_data, f)
 
         # Evaluate metrics.
-        if (snapshot_data is not None) and (len(metrics) > 0):
-            if rank == 0:
-                print('Evaluating metrics...')
-            for metric in metrics:
-                result_dict = metric_main.calc_metric(metric=metric, G=snapshot_data['G_ema'],
-                    dataset_kwargs=training_set_kwargs, num_gpus=num_gpus, rank=rank, device=device)
-                if rank == 0:
-                    metric_main.report_metric(result_dict, run_dir=run_dir, snapshot_pkl=snapshot_pkl)
-                stats_metrics.update(result_dict.results)
+        # if (snapshot_data is not None) and (len(metrics) > 0):
+        #     if rank == 0:
+        #         print('Evaluating metrics...')
+        #     for metric in metrics:
+        #         result_dict = metric_main.calc_metric(metric=metric, G=snapshot_data['G_ema'],
+        #             dataset_kwargs=training_set_kwargs, num_gpus=num_gpus, rank=rank, device=device)
+        #         if rank == 0:
+        #             metric_main.report_metric(result_dict, run_dir=run_dir, snapshot_pkl=snapshot_pkl)
+        #         stats_metrics.update(result_dict.results)
         del snapshot_data # conserve memory
 
         # Collect statistics.

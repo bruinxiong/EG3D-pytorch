@@ -3,6 +3,7 @@ results/
 env.md
 datasets/
 ~/
+training-runs/
 # system ignore
 .DS_Store
 ._.DS_Store

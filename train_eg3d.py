@@ -216,7 +216,7 @@ def main(**kwargs):
         ),
 
         )
-    c.D_kwargs = dnnlib.EasyDict(class_name='training.EG3d.EG3dDiscriminator', block_kwargs=dnnlib.EasyDict(
+    c.D_kwargs = dnnlib.EasyDict(class_name='training.EG3d_v2.EG3dDiscriminator', block_kwargs=dnnlib.EasyDict(
     ), mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
     c.G_opt_kwargs = dnnlib.EasyDict(
         class_name='torch.optim.Adam', betas=[0, 0.99], eps=1e-8)
@@ -253,10 +253,11 @@ def main(**kwargs):
     c.D_opt_kwargs.lr = opts.dlr
     c.metrics = opts.metrics
     c.total_kimg = opts.kimg
-    c.kimg_per_tick = opts.tick
-    c.image_snapshot_ticks = c.network_snapshot_ticks = opts.snap
+    c.kimg_per_tick = 0.1 # opts.tick
+    c.image_snapshot_ticks = 1
+    c.network_snapshot_ticks = 50 # opts.snap
     c.random_seed = c.training_set_kwargs.random_seed = opts.seed
-    c.data_loader_kwargs.num_workers = 0 # opts.workers # 不设置为0会报错
+    c.data_loader_kwargs.num_workers =  opts.workers # 不设置为0会报错
 
     # Sanity checks.
     if c.batch_size % c.num_gpus != 0:
@@ -275,7 +276,7 @@ def main(**kwargs):
     c.ema_kimg = c.batch_size * 10 / 32
     if opts.cfg == 'stylegan2':
         # c.G_kwargs.class_name = 'training.networks_stylegan2.Generator'
-        c.G_kwargs.class_name = 'training.EG3d.Generator'
+        c.G_kwargs.class_name = 'training.EG3d_v2.Generator'
         # Enable style mixing regularization.
         c.loss_kwargs.style_mixing_prob = 0.9
         c.loss_kwargs.pl_weight = 2  # Enable path length regularization.
@@ -339,3 +340,7 @@ if __name__ == "__main__":
 
 # ----------------------------------------------------------------------------
 # python train_eg3d.py --outdir=~/training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=32 --gamma=1 --mirror=1 --aug=noaug
+
+# python train_eg3d.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=32 --gamma=1 --mirror=0 --aug=noaug
+
+# stylegan3 是如何多并行统计梯度的？ 没有看到调用distributedParalel.
