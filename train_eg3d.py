@@ -142,6 +142,7 @@ def parse_comma_separated_list(s):
 @click.command()
 # Required.
 @click.option('--outdir',       help='Where to save the results', metavar='DIR',                required=True)
+@click.option('--version',      type=click.Choice(['EG3d_v2', 'EG3d_v3']), required=True)
 @click.option('--cfg',          help='Base configuration',                                      type=click.Choice(['stylegan3-t', 'stylegan3-r', 'stylegan2']), required=True)
 @click.option('--data',         help='Training data', metavar='[ZIP|DIR]',                      type=str, required=True)
 @click.option('--gpus',         help='Number of GPUs to use', metavar='INT',                    type=click.IntRange(min=1), required=True)
@@ -216,7 +217,7 @@ def main(**kwargs):
         ),
 
         )
-    c.D_kwargs = dnnlib.EasyDict(class_name='training.EG3d_v2.EG3dDiscriminator', block_kwargs=dnnlib.EasyDict(
+    c.D_kwargs = dnnlib.EasyDict(class_name=f'training.{opts.version}.EG3dDiscriminator', block_kwargs=dnnlib.EasyDict(
     ), mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
     c.G_opt_kwargs = dnnlib.EasyDict(
         class_name='torch.optim.Adam', betas=[0, 0.99], eps=1e-8)
@@ -247,10 +248,10 @@ def main(**kwargs):
     # c.G_kwargs.init_point_kwargs
     c.D_kwargs.block_kwargs.freeze_layers = opts.freezed
     c.D_kwargs.epilogue_kwargs.mbstd_group_size = opts.mbstd_group
-    c.loss_kwargs.r1_gamma = opts.gamma
-    c.G_opt_kwargs.lr = (
-        0.002 if opts.cfg == 'stylegan2' else 0.0025) if opts.glr is None else opts.glr
-    c.D_opt_kwargs.lr = opts.dlr
+    c.loss_kwargs.r1_gamma = 1.0  # opts.gamma
+    c.G_opt_kwargs.lr = 0.0025
+    #(0.0025 if opts.cfg == 'stylegan2' else 0.0025) if opts.glr is None else opts.glr
+    c.D_opt_kwargs.lr = 0.002 #  opts.dlr
     c.metrics = opts.metrics
     c.total_kimg = opts.kimg
     c.kimg_per_tick = 0.1 # opts.tick
@@ -276,7 +277,7 @@ def main(**kwargs):
     c.ema_kimg = c.batch_size * 10 / 32
     if opts.cfg == 'stylegan2':
         # c.G_kwargs.class_name = 'training.networks_stylegan2.Generator'
-        c.G_kwargs.class_name = 'training.EG3d_v2.Generator'
+        c.G_kwargs.class_name = f'training.{opts.version}.Generator'
         # Enable style mixing regularization.
         c.loss_kwargs.style_mixing_prob = 0.9
         c.loss_kwargs.pl_weight = 2  # Enable path length regularization.
@@ -328,10 +329,8 @@ def main(**kwargs):
     desc = f'{opts.cfg:s}-{dataset_name:s}-gpus{c.num_gpus:d}-batch{c.batch_size:d}-gamma{c.loss_kwargs.r1_gamma:g}'
     if opts.desc is not None:
         desc += f'-{opts.desc}'
-
     # Launch.
-    launch_training(c=c, desc=desc, outdir=opts.outdir, dry_run=opts.dry_run)
-
+    launch_training(c=c, desc=desc, outdir=os.path.join(opts.outdir, opts.version), dry_run=opts.dry_run)
 # ----------------------------------------------------------------------------
 
 
@@ -342,5 +341,3 @@ if __name__ == "__main__":
 # python train_eg3d.py --outdir=~/training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=32 --gamma=1 --mirror=1 --aug=noaug
 
 # python train_eg3d.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=32 --gamma=1 --mirror=0 --aug=noaug
-
-# stylegan3 是如何多并行统计梯度的？ 没有看到调用distributedParalel.

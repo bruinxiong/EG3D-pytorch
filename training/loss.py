@@ -16,16 +16,21 @@ from torch_utils.ops import conv2d_gradfix
 from torch_utils.ops import upfirdn2d
 from random import randint
 from training.camera_utils import get_cam2world_matrix
+from torch.nn import functional as F
+from torchvision.utils import save_image
+import os
 #----------------------------------------------------------------------------
 
 class Loss:
-    def accumulate_gradients(self, phase, real_img, real_c, gen_z, gen_c, gain, cur_nimg): # to be overridden by subclass
+    def accumulate_gradients(self, phase, real_img, real_c, gen_z, gen_c, gain, cur_nimg, nerf_resolution, random_swap_prob): # to be overridden by subclass
         raise NotImplementedError()
 
 #----------------------------------------------------------------------------
 
 class StyleGAN2Loss(Loss):
-    def __init__(self, device, G, D, augment_pipe=None, r1_gamma=10, style_mixing_prob=0, pl_weight=0, pl_batch_shrink=2, pl_decay=0.01, pl_no_weight_grad=False, blur_init_sigma=0, blur_fade_kimg=0):
+    def __init__(self, device, G, D, augment_pipe=None, r1_gamma=10, style_mixing_prob=0, pl_weight=0, pl_batch_shrink=2, pl_decay=0.01, 
+    pl_no_weight_grad=False, blur_init_sigma=0, blur_fade_kimg=0, rank=None
+    ):
         super().__init__()
         self.device             = device
         self.G                  = G
@@ -40,11 +45,19 @@ class StyleGAN2Loss(Loss):
         self.pl_mean            = torch.zeros([], device=device)
         self.blur_init_sigma    = blur_init_sigma
         self.blur_fade_kimg     = blur_fade_kimg
-
+        self.rank = rank
         self.network_type = 'eg3d'
         
-    def trans_c_to_matrix(self, c1, c2=None):
-        if torch.rand(1) < self.style_mixing_prob and c2 is not None:
+    # def trans_c_to_matrix(self, c1, c2=None, random_swap_prob=1.0):
+    #     if torch.rand(1) < random_swap_prob and c2 is not None:
+    #         cutoff = randint(0, 1)  # x , y
+    #         c1[:, cutoff] = c2[:, cutoff]  # 交换一个位置的旋转值
+    #     bs = c1.shape[0]
+    #     c = get_cam2world_matrix(c1, device=c1.device)[:, :3]  # b, 3, 4
+    #     c = c.reshape(bs, 12)  # b, 12
+    #     return c
+    def trans_c_to_matrix(self, c1, c2=None, random_swap_prob=1.0):
+        if random_swap_prob !=0 and torch.rand(1) < random_swap_prob and c2 is not None:
             cutoff = randint(0, 1)  # x , y
             c1[:, cutoff] = c2[:, cutoff]  # 交换一个位置的旋转值
         bs = c1.shape[0]
@@ -52,8 +65,10 @@ class StyleGAN2Loss(Loss):
         c = c.reshape(bs, 12)  # b, 12
         return c
 
-    def run_G(self, z, c, update_emas=False, global_step=None):
-        ws = self.G.mapping(z, c, update_emas=update_emas)
+    def run_G(self, z, c, c2=None, update_emas=False, global_step=None, nerf_resolution=64):
+        if c2 is None:
+            c2 = c
+        ws = self.G.mapping(z, c2, update_emas=update_emas)
         if self.style_mixing_prob > 0:
             with torch.autograd.profiler.record_function('style_mixing'):
                 cutoff = torch.empty([], dtype=torch.int64, device=ws.device).random_(1, ws.shape[1])
@@ -62,8 +77,9 @@ class StyleGAN2Loss(Loss):
         if self.network_type == 'eg3d':
             synthesis_kwargs = {}
             bs = z.shape[0]
-            synthesis_kwargs['second_sample_noise_std'] = max(0, 1. - global_step / 5000. / bs)
-            imgs = self.G(c=c, ws=ws, update_emas=update_emas, **synthesis_kwargs) # b,6,h,w
+            synthesis_kwargs['second_sample_noise_std'] = 1.0 # max(0, 1. - global_step / 5000. / bs)
+            synthesis_kwargs['nerf_resolution'] = nerf_resolution
+            imgs = self.G(c=c, ws=ws, c2=c2, update_emas=update_emas, **synthesis_kwargs) # b,6,h,w
         else:
             imgs = self.G.synthesis(ws, update_emas=update_emas)
         return imgs, ws
@@ -79,7 +95,7 @@ class StyleGAN2Loss(Loss):
         logits = self.D(img, c, update_emas=update_emas)
         return logits
 
-    def accumulate_gradients(self, phase, real_img, real_c, gen_z, gen_c1, gen_c2, gain, cur_nimg):
+    def accumulate_gradients(self, phase, real_img, real_c, gen_z, gen_c1, gen_c2, gain, cur_nimg, nerf_resolution=64, random_swap_prob=1.0):
         assert phase in ['Gmain', 'Greg', 'Gboth', 'Dmain', 'Dreg', 'Dboth']
         if self.pl_weight == 0:
             phase = {'Greg': 'none', 'Gboth': 'Gmain'}.get(phase, phase)
@@ -87,17 +103,29 @@ class StyleGAN2Loss(Loss):
             phase = {'Dreg': 'none', 'Dboth': 'Dmain'}.get(phase, phase)
         blur_sigma = max(1 - cur_nimg / (self.blur_fade_kimg * 1e3), 0) * self.blur_init_sigma if self.blur_fade_kimg > 0 else 0
         assert self.network_type == 'eg3d'
-        cond = self.trans_c_to_matrix(gen_c1, gen_c2)
+        cond_1 = self.trans_c_to_matrix(gen_c1, random_swap_prob=0) # nerf的输入
+        cond_2 = self.trans_c_to_matrix(gen_c1, gen_c2, random_swap_prob)  # mapping net的输入
         real_c = self.trans_c_to_matrix(real_c)
         # Gmain: Maximize logits for generated images.
         if phase in ['Gmain', 'Gboth']:
             with torch.autograd.profiler.record_function('Gmain_forward'):
-                gen_img, _gen_ws = self.run_G(gen_z, cond, global_step=cur_nimg)
-                gen_logits = self.run_D(gen_img, cond, blur_sigma=blur_sigma)
+                gen_img, _gen_ws = self.run_G(gen_z, cond_1, c2=cond_2, global_step=cur_nimg, nerf_resolution=nerf_resolution)
+                gen_logits = self.run_D(gen_img, cond_1, blur_sigma=blur_sigma)
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
                 loss_Gmain = torch.nn.functional.softplus(-gen_logits) # -log(sigmoid(gen_logits))
                 training_stats.report('Loss/G/loss', loss_Gmain)
+                # if self.rank == 0:
+                #     b = gen_img.shape[0]
+                #     tmp = gen_img.reshape(b, 2, 3, 256, 256).reshape(b*2, 3, 256, 256)
+                #     save_image(
+                #         tmp.detach().cpu(), 
+                #         os.path.join(f'./{cur_nimg}.png'), 
+                #         nrow=2, 
+                #         padding=2, 
+                #         normalize=True, 
+                #         range=(-1, 1)
+                #         )
             with torch.autograd.profiler.record_function('Gmain_backward'):
                 loss_Gmain.mean().mul(gain).backward()
 
@@ -124,8 +152,8 @@ class StyleGAN2Loss(Loss):
         loss_Dgen = 0
         if phase in ['Dmain', 'Dboth']:
             with torch.autograd.profiler.record_function('Dgen_forward'):
-                gen_img, _gen_ws = self.run_G(gen_z, cond, update_emas=True, global_step=cur_nimg)
-                gen_logits = self.run_D(gen_img, cond, blur_sigma=blur_sigma, update_emas=True)
+                gen_img, _gen_ws = self.run_G(gen_z, cond_1, c2=cond_2, update_emas=True, global_step=cur_nimg, nerf_resolution=nerf_resolution)
+                gen_logits = self.run_D(gen_img, cond_1, blur_sigma=blur_sigma, update_emas=True)
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
                 loss_Dgen = torch.nn.functional.softplus(gen_logits) # -log(1 - sigmoid(gen_logits))
@@ -139,7 +167,21 @@ class StyleGAN2Loss(Loss):
             with torch.autograd.profiler.record_function(name + '_forward'):
                 real_img_tmp = real_img.detach().requires_grad_(phase in ['Dreg', 'Dboth'])
                 if self.network_type == 'eg3d':
-                    real_img_tmp = torch.cat([real_img_tmp, real_img_tmp], dim=1)  # b, 6, h, w
+                    real_img_tmp_resize = F.interpolate(F.interpolate(real_img_tmp, scale_factor=0.5), scale_factor=2.0)
+                    real_img_tmp = torch.cat([real_img_tmp, real_img_tmp_resize], dim=1)  # b, 6, h, w
+                    real_img_tmp = torch.clamp(real_img_tmp, -1, 1)
+                    # if self.rank ==0:
+                    #     b = real_img_tmp_resize.shape[0]
+                    #     tmp = real_img_tmp.reshape(b, 2, 3, 256, 256).reshape(b*2, 3, 256, 256)
+                    #     save_image(
+                    #         tmp.detach().cpu(), 
+                    #         os.path.join(f'./{cur_nimg}.png'), 
+                    #         nrow=2, 
+                    #         padding=2, 
+                    #         normalize=True, 
+                    #         range=(-1, 1)
+                    #         )
+
                 real_logits = self.run_D(real_img_tmp, real_c, blur_sigma=blur_sigma)
                 training_stats.report('Loss/scores/real', real_logits)
                 training_stats.report('Loss/signs/real', real_logits.sign())

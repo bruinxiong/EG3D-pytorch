@@ -9,9 +9,9 @@ from mpl_toolkits.mplot3d import Axes3D
 from glob import glob 
 from training.cips_camera_utils import get_fine_points_and_direction, fancy_integration
 
-# V2:
-# 只对低分辨率训练，快速调试，定位bug
-# 去除掉Gen的cond，姿态控制几乎没有，在第300个step还崩溃了，见第34行。也是由于数值异常。加入clip norm？
+# 和v2的区别是
+# 高分辨率和低分辨率结合
+# 结果：在第300个step没有崩溃，同样是Gen不用cond，对姿态的控制能力待观察。
 
 @persistence.persistent_class
 class LightDecoder(nn.Module):
@@ -30,8 +30,6 @@ class LightDecoder(nn.Module):
         x = self.fc1(x)
         x = self.fc2(x)
         sigma = self.sigma(x)
-        # print(sigma)
-        # 崩溃的原因：随着训练的进行，sigma会变成很大的负值，经过sigmoid为0.在后来的积分公式中，导致alpha恒为0，看到的都是透明
         sigma = F.sigmoid(sigma)
         x = self.fc3(x) 
         feat = self.feat(x)
@@ -45,6 +43,7 @@ class ToRGB(nn.Module):
         super().__init__()
         # self.conv1 = Conv2dLayer(in_c, out_c, 1)  # 核为3崩溃，核用1的正常
         self.fc1 = FullyConnectedLayer(in_c, out_c)
+
 
     def forward(self, x):
         bs, c, h, w = x.shape
@@ -119,6 +118,8 @@ class SuperResolutionNet(nn.Module): # 简化计算量，只上采样一倍
             x, img = block(x, img, cur_ws, **block_kwargs)
         return img
     
+            
+        
 
 class Generator(torch.nn.Module):
     def __init__(self,
@@ -252,7 +253,7 @@ class Generator(torch.nn.Module):
                 reshape(bs, n_points, n_step, volume_channel) # b, hw, n, c+1
         if self.rank == 0:
             print(2222)
-            # print(nerf_feat[0,5, 0, :], nerf_feat[0,90,2, :])
+            print(nerf_feat[0,5, 0, :], nerf_feat[0,90,2, :])
         if True:
             fine_points, fine_z_vals = get_fine_points_and_direction(
                 nerf_feat, z_vals, nerf_noise=second_sample_noise_std * 0.5,
@@ -281,7 +282,7 @@ class Generator(torch.nn.Module):
             nerf_feat = torch.gather(nerf_feat, -2, indices.expand(-1, -1, -1, volume_channel))
         if self.rank == 0:
             print(333)
-            # print(fine_nerf_feat[0,5, 0, :], fine_nerf_feat[0,90, 2, :])
+            print(fine_nerf_feat[0,5, 0, :], fine_nerf_feat[0,90, 2, :])
         # 开始volume rendering，这里直接使用CIPS3d的代码 # 需要好好阅读一下giffare，CIPS，GRAF的代码
         # 沿用CIPS的代码
         pixels_fea, _, _ = fancy_integration(
@@ -296,24 +297,14 @@ class Generator(torch.nn.Module):
         pixels_fea = pixels_fea.reshape(bs, h, w, volume_channel-1).permute(0, 3, 1, 2)# bs, 32, h, w
         if self.rank == 0:
             print(44444)
-            # print(pixels_fea[0, :, 10:12, 10])
-        # ****************************************************************
-        # for debug
+            print(pixels_fea[0, :, 10:12, 10])
+      
         gen_low_img = self.aux_to_rgb(pixels_fea) # bs, 3, h', w'
         gen_low_img = F.interpolate(gen_low_img, scale_factor=2, mode='bilinear')
-        gen_imgs = torch.cat([gen_low_img, gen_low_img], dim=1) # bs, 6, h, w
-        return gen_imgs
-        # ****************************************************************
-        # gen_low_img = pixels_fea[:, :3, ...] # bs,3,h,w
         ws = ws[:, self.synthesis.num_ws:]  # 超分辨率的ws
         assert ws.shape[1] == self.super_res.num_ws
         gen_high_img = self.super_res(pixels_fea, ws,  **synthesis_kwargs)  # bs, 3, h ,w 
         assert gen_high_img.shape[-1] == 256
-        # 拼接两张图像然后输出
-        # scale_factor = gen_high_img.shape[-1] // gen_low_img.shape[-1]
-        # gen_low_img = F.interpolate(gen_low_img, scale_factor=scale_factor, mode='bilinear')
-        # for debug, 两个图像都是高分辨率
-        # print(gen_high_img.max(), gen_high_img.min(), gen_high_img.mean())
         gen_imgs = torch.cat([gen_high_img, gen_low_img], dim=1) # bs, 6, h, w
         return gen_imgs
 

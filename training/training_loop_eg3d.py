@@ -97,7 +97,7 @@ def training_loop(
     ada_target              = None,     # ADA target value. None = fixed p.
     ada_interval            = 4,        # How often to perform ADA adjustment?
     ada_kimg                = 500,      # ADA adjustment speed, measured in how many kimg it takes for p to increase/decrease by one unit.
-    total_kimg              = 25000,    # Total length of the training, measured in thousands of real images.
+    total_kimg              = 25000,    # Total length of the training, measured in thousands of real images.  # 25M
     kimg_per_tick           = 4,        # Progress snapshot interval.
     image_snapshot_ticks    = 1,       # How often to save image snapshots? None = disable.
     network_snapshot_ticks  = 50,       # How often to save network snapshots? None = disable.
@@ -136,17 +136,16 @@ def training_loop(
         print('Image shape:', training_set.image_shape)
         print('Label shape:', 12)
         print()
-
     # Construct networks.
     if rank == 0:
         print('Constructing networks...')
-    common_kwargs = dict(c_dim= 12, #12, 
+    common_kwargs = dict(c_dim= 0, #12,  尝试一下G不用cond
         img_resolution=training_set.resolution, 
         img_channels= 96,
         backbone_resolution=128,
         rank=rank,
      )
-    common_kwargs_for_D = dict(c_dim=12, #12, # 尝试一下D不用cond
+    common_kwargs_for_D = dict(c_dim=12, #12, 
         img_resolution=training_set.resolution, 
         img_channels=6,
      )
@@ -220,10 +219,11 @@ def training_loop(
     grid_c = None
     if rank == 0:
         print('Exporting sample images...')
-        grid_size, conds = setup_snapshot_image_grid(num=4, device=device)
+        num = 1
+        grid_size, conds = setup_snapshot_image_grid(num=1, device=device)
         grid_c = conds
         # save_image_grid(images, os.path.join(run_dir, 'reals.png'), drange=[0,255], grid_size=grid_size)
-        grid_z = torch.randn([4, G.z_dim], device=device)
+        grid_z = torch.randn([num, G.z_dim], device=device)
         # grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
         meta_data = {'second_sample_noise_std': 0, 'noise_mode': 'const'}
         total_imgs = []
@@ -291,10 +291,12 @@ def training_loop(
             phase.opt.zero_grad(set_to_none=True)
             phase.module.requires_grad_(True)
             for real_img, real_c, gen_z, gen_c1, gen_c2 in zip(phase_real_img, phase_real_c, phase_gen_z, random_c1, random_c2):
-                loss.accumulate_gradients(phase=phase.name, real_img=real_img, real_c=real_c, gen_z=gen_z, gen_c1=gen_c1, gen_c2=gen_c2, gain=phase.interval, cur_nimg=cur_nimg)
+                loss.accumulate_gradients(phase=phase.name, real_img=real_img, real_c=real_c, gen_z=gen_z, gen_c1=gen_c1, gen_c2=gen_c2, 
+                gain=phase.interval, cur_nimg=cur_nimg)
             phase.module.requires_grad_(False)
 
             # Update weights.
+            # 更新模型参数，多gpu统计梯度
             with torch.autograd.profiler.record_function(phase.name + '_opt'):
                 params = [param for param in phase.module.parameters() if param.grad is not None]
                 if len(params) > 0:
