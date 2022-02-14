@@ -142,7 +142,7 @@ def parse_comma_separated_list(s):
 @click.command()
 # Required.
 @click.option('--outdir',       help='Where to save the results', metavar='DIR',                required=True)
-@click.option('--version',      type=click.Choice(['EG3d_v2', 'EG3d_v3']), required=True)
+@click.option('--version',      type=click.Choice(['EG3d_v2', 'EG3d_v3', 'EG3d_v7', 'EG3d_v8']), required=True)
 @click.option('--cfg',          help='Base configuration',                                      type=click.Choice(['stylegan3-t', 'stylegan3-r', 'stylegan2']), required=True)
 @click.option('--data',         help='Training data', metavar='[ZIP|DIR]',                      type=str, required=True)
 @click.option('--gpus',         help='Number of GPUs to use', metavar='INT',                    type=click.IntRange(min=1), required=True)
@@ -207,7 +207,7 @@ def main(**kwargs):
             nerf_resolution=128,
             fov=12,
             d_range=(0.88, 1.12),
-            num_steps=48,  # 实际会有2倍
+            # num_steps=36,  # 实际会有2倍
         ),
         use_noise=False,  # 关闭noise
         nerf_decoder_kwargs=dnnlib.EasyDict(
@@ -230,7 +230,7 @@ def main(**kwargs):
     c.training_set_kwargs, dataset_name = init_dataset_kwargs(
                 data=opts.data, 
                 cond_data='/home/yangjie08/wuchao/hopenet/ffhq_euler.txt',
-                resolution=256,
+                resolution=64, # 256,
                 )
     if opts.cond and not c.training_set_kwargs.use_labels:
         raise click.ClickException(
@@ -254,11 +254,11 @@ def main(**kwargs):
     c.D_opt_kwargs.lr = 0.002 #  opts.dlr
     c.metrics = opts.metrics
     c.total_kimg = opts.kimg
-    c.kimg_per_tick = 0.1 # opts.tick
+    c.kimg_per_tick = opts.tick  # 0.1 for debug
     c.image_snapshot_ticks = 1
     c.network_snapshot_ticks = 50 # opts.snap
     c.random_seed = c.training_set_kwargs.random_seed = opts.seed
-    c.data_loader_kwargs.num_workers =  opts.workers # 不设置为0会报错
+    c.data_loader_kwargs.num_workers =  opts.workers 
 
     # Sanity checks.
     if c.batch_size % c.num_gpus != 0:
@@ -338,6 +338,7 @@ if __name__ == "__main__":
     main()  # pylint: disable=no-value-for-parameter
 
 # ----------------------------------------------------------------------------
-# python train_eg3d.py --outdir=~/training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=32 --gamma=1 --mirror=1 --aug=noaug
 
-# python train_eg3d.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=32 --gamma=1 --mirror=0 --aug=noaug
+# python train_eg3d.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=64 --gamma=1 --mirror=0 --aug=noaug
+# python train_eg3d.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=64 --gamma=1 --mirror=0 --aug=noaug --version EG3d_v7
+

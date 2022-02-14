@@ -23,7 +23,6 @@ from torch_utils import misc
 from torch_utils import training_stats
 from torch_utils.ops import conv2d_gradfix
 from torch_utils.ops import grid_sample_gradfix
-from training.camera_utils import get_cam2world_matrix
 import legacy
 from metrics import metric_main
 
@@ -34,16 +33,14 @@ def setup_snapshot_image_grid(num=4, device=torch.device('cpu'),random_seed=0):
     gw = 5 # np.clip(7680 // training_set.image_shape[2], 7, 32)
     gh = num  # np.clip(4320 // training_set.image_shape[1], 4, 32)
     
-    yaws = torch.linspace(-20, 20, gw)
+    yaws = torch.linspace(-30, 30, gw)
     # yaws = torch.linspace(-1, 1, gw)
     conds = []
     for idx in range(gw):
         x = z = 0
         y = yaws[idx]
-        angles = torch.tensor([x, y, z], device=device).reshape(1, -1) # 1, 3
-        cond = get_cam2world_matrix(angles, device=device)[:, :3]  # 1, 3, 4
-        cond = cond.reshape(1, 12).repeat(num, 1)  # b, 12
-        conds.append(cond) 
+        angles = torch.tensor([x, y, z], device=device).reshape(1, -1).expand(gh, -1) # b, 3
+        conds.append(angles) 
     # Load data.
     # images, labels = zip(*[training_set[i] for i in grid_indices])
     # return (gw, gh), 
@@ -134,20 +131,27 @@ def training_loop(
         print()
         print('Num images: ', len(training_set))
         print('Image shape:', training_set.image_shape)
-        print('Label shape:', 12)
+        print('Label shape:', 16)
         print()
     # Construct networks.
     if rank == 0:
         print('Constructing networks...')
-    common_kwargs = dict(c_dim= 0, #12,  尝试一下G不用cond
+    nerf_init_args = {}
+    nerf_init_args['num_steps'] = 36
+    nerf_init_args['img_size'] = 64
+    nerf_init_args['nerf_noise'] = 0.5
+    nerf_init_args['ray_start'] = 0.88
+    nerf_init_args['ray_end'] = 1.12
+    nerf_init_args['fov'] = 12
+    common_kwargs = dict(c_dim=0, #12,  尝试一下G不用cond
         img_resolution=training_set.resolution, 
         img_channels= 96,
         backbone_resolution=128,
         rank=rank,
      )
-    common_kwargs_for_D = dict(c_dim=12, #12, 
+    common_kwargs_for_D = dict(c_dim=16, #12, 
         img_resolution=training_set.resolution, 
-        img_channels=6,
+        img_channels=3,  # 先尝试使用单张图训练， TODO：高低分辨率都使用单独的判别器
      )
     G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
     D = dnnlib.util.construct_class_by_name(**D_kwargs, **common_kwargs_for_D).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
@@ -165,9 +169,9 @@ def training_loop(
     if rank == 0:
         z = torch.empty([batch_gpu, G.z_dim], device=device)
         # c = torch.empty([batch_gpu, G.c_dim], device=device)
-        c = torch.empty([batch_gpu, 12], device=device)
-        meta_data = {'second_sample_noise_std': 0, 'noise_mode': 'const'}
-        img = misc.print_module_summary(G, [z, c], **meta_data)
+        c = torch.empty([batch_gpu, 3], device=device)
+        meta_data = {'noise_mode': 'const'}
+        img = misc.print_module_summary(G, [z, c], nerf_init_args=nerf_init_args, **meta_data)
         misc.print_module_summary(D, [img, c])
 
     # Setup augmentation.
@@ -200,7 +204,7 @@ def training_loop(
             phases += [dnnlib.EasyDict(name=name+'both', module=module, opt=opt, interval=1)]
         else: # Lazy regularization.
             mb_ratio = reg_interval / (reg_interval + 1)
-            opt_kwargs = dnnlib.EasyDict(opt_kwargs)
+            opt_kwawrgs = dnnlib.EasyDict(opt_kwargs)
             opt_kwargs.lr = opt_kwargs.lr * mb_ratio
             opt_kwargs.betas = [beta ** mb_ratio for beta in opt_kwargs.betas]
             opt = dnnlib.util.construct_class_by_name(module.parameters(), **opt_kwargs) # subclass of torch.optim.Optimizer
@@ -219,16 +223,16 @@ def training_loop(
     grid_c = None
     if rank == 0:
         print('Exporting sample images...')
-        num = 1
-        grid_size, conds = setup_snapshot_image_grid(num=1, device=device)
-        grid_c = conds
+        num = 4
+        grid_size, conds = setup_snapshot_image_grid(num=num, device=device)
+        grid_c = conds  # b, 3 of list
         # save_image_grid(images, os.path.join(run_dir, 'reals.png'), drange=[0,255], grid_size=grid_size)
         grid_z = torch.randn([num, G.z_dim], device=device)
         # grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
-        meta_data = {'second_sample_noise_std': 0, 'noise_mode': 'const'}
+        meta_data = {'noise_mode': 'const'}
         total_imgs = []
         for c in grid_c:
-            images = G_ema(z=grid_z, c=c, **meta_data)[:, :3]  # b,3,h,w
+            images = G_ema(z=grid_z, angles=c, nerf_init_args=nerf_init_args, **meta_data)[:, :3]  # b,3,h,w
             res = images.shape[-1]
             # save_image_grid(images, os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
             total_imgs.append(images)
@@ -304,7 +308,7 @@ def training_loop(
                     if num_gpus > 1:
                         torch.distributed.all_reduce(flat)
                         flat /= num_gpus
-                    misc.nan_to_num(flat, nan=0, posinf=1e5, neginf=-1e5, out=flat)
+                    # misc.nan_to_num(flat, nan=0, posinf=1e5, neginf=-1e5, out=flat)
                     grads = flat.split([param.numel() for param in params])
                     for param, grad in zip(params, grads):
                         param.grad = grad.reshape(param.shape)
@@ -349,8 +353,8 @@ def training_loop(
         fields += [f"time {dnnlib.util.format_time(training_stats.report0('Timing/total_sec', tick_end_time - start_time)):<12s}"]
         fields += [f"sec/tick {training_stats.report0('Timing/sec_per_tick', tick_end_time - tick_start_time):<7.1f}"]
         fields += [f"sec/kimg {training_stats.report0('Timing/sec_per_kimg', (tick_end_time - tick_start_time) / (cur_nimg - tick_start_nimg) * 1e3):<7.2f}"]
-        fields += [f"maintenance {training_stats.report0('Timing/maintenance_sec', maintenance_time):<6.1f}"]
-        fields += [f"cpumem {training_stats.report0('Resources/cpu_mem_gb', psutil.Process(os.getpid()).memory_info().rss / 2**30):<6.2f}"]
+        # fields += [f"maintenance {training_stats.report0('Timing/maintenance_sec', maintenance_time):<6.1f}"]
+        # fields += [f"cpumem {training_stats.report0('Resources/cpu_mem_gb', psutil.Process(os.getpid()).memory_info().rss / 2**30):<6.2f}"]
         fields += [f"gpumem {training_stats.report0('Resources/peak_gpu_mem_gb', torch.cuda.max_memory_allocated(device) / 2**30):<6.2f}"]
         fields += [f"reserved {training_stats.report0('Resources/peak_gpu_mem_reserved_gb', torch.cuda.max_memory_reserved(device) / 2**30):<6.2f}"]
         torch.cuda.reset_peak_memory_stats()
@@ -371,10 +375,10 @@ def training_loop(
         if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_tick % image_snapshot_ticks == 0):
             # images = torch.cat([G_ema(z=z, c=c).cpu() for z, c in zip(grid_z, grid_c)]).numpy()
             # save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.png'), drange=[-1,1], grid_size=grid_size)
-            meta_data = {'second_sample_noise_std': 0, 'noise_mode': 'const'}
+            meta_data = {'noise_mode': 'const'}
             total_imgs = []
             for c in grid_c:
-                images = G_ema(z=grid_z, c=c, **meta_data)[:, :3]  # b,3,h,w
+                images = G_ema(z=grid_z, angles=c, nerf_init_args=nerf_init_args, **meta_data)[:, :3]  # b,3,h,w
                 # images = G(z=grid_z, c=c, **meta_data)[:, :3]  # b,3,h,w
                 res = images.shape[-1]
                 # save_image_grid(images, os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
