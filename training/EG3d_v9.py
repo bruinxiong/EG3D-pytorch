@@ -10,13 +10,16 @@ from glob import glob
 from training.cips_camera_utils_v2 import  my_get_world_points_and_direction
 from training.pigan_utils import fancy_integration, sample_pdf
 
-# 和v3的区别是
-# 根据在EG3d_based_on_rosinality获得的认识重新修改代码
-# tri-plane的大小调整为128， 射线数目始终为64， 超分辨率两倍 ：加快训练和验证速度
-# lrelu修改为relu
+# c
+# 加入高低分辨率训练， D的in_c 为 6, 两个dis[ok]  
+# 归一化因子从0.15调整为0.18 [ok]
+# backbone的noise input打开 [ok] 
+# light weight decoder的激活函数使用relu [ok]
+# r1_gamma为0 [ok]
+# light decoder的sigma都是负值，调整模型的lr_multiplier为0.2 [x]
 
 
-# TODO: 1.高低分辨率； 2.random swap
+# TODO: 2.random swap  3. horizontal filp
 @persistence.persistent_class
 class LightDecoder(nn.Module):
     def __init__(self, in_c, mid_c, out_c):
@@ -68,6 +71,63 @@ class LightDecoder(nn.Module):
         o = torch.cat([feat, sigma], dim=-1) # bs_n *h*w,  33
         o = o.reshape(bs_n, h, w, 33).permute(0, 3, 1, 2) # bs_n, c ,h, w
         return o
+
+# from kevinJiang
+@persistence.persistent_class
+class Decoder(torch.nn.Module):
+    def __init__(self, 
+        in_c: int, 
+        mid_c: int, 
+        out_c: int, 
+        num_layers=3,
+        lr_multiplier=1.0, 
+        activation='relu', 
+    ):
+        super().__init__()
+        self.num_layers = num_layers
+
+        self.fc0 = self.create_block(in_c, mid_c, activation=activation)
+
+        for idx in range(1, num_layers - 1):
+            layer = self.create_block(mid_c, mid_c, activation=activation)
+            setattr(self, f'fc{idx}', layer)
+        
+        setattr(self, f'fc{num_layers - 1}', self.create_block(mid_c, out_c + 1, activation='none'))
+
+    def create_block(self, in_features: int, out_features: int, activation: str):
+        if activation == 'relu':
+            return torch.nn.Sequential(
+                torch.nn.Linear(in_features, out_features), 
+                torch.nn.ReLU()
+            )
+        elif activation == 'softmax':
+            return torch.nn.Sequential(
+                torch.nn.Linear(in_features, out_features), 
+                torch.nn.Softmax(dim=-1)
+            )
+        elif activation == 'softplus':
+            return torch.nn.Sequential(
+                torch.nn.Linear(in_features, out_features), 
+                torch.nn.Softplus()
+            )
+        elif activation == 'none':
+            return torch.nn.Linear(in_features, out_features)
+        else:
+            raise NotImplementedError()
+
+    def forward(self, feature: torch.Tensor):
+        x = feature
+        bs_n, c, h, w = x.shape
+        x = x.permute(0, 2, 3, 1).reshape(-1, c)
+        # Main layers
+        for idx in range(self.num_layers - 1):
+            layer = getattr(self, f'fc{idx}')
+            x = layer(x)
+        o = getattr(self, f'fc{self.num_layers - 1}')(x)
+        o = o.reshape(bs_n, h, w, 33).permute(0, 3, 1, 2) # bs_n, c ,h, w
+        return o
+        
+
 
 @persistence.persistent_class
 class ToRGB(nn.Module):
@@ -167,17 +227,25 @@ class Generator(torch.nn.Module):
         self.img_channels = img_channels
         self.backbone_resolution = backbone_resolution
         # self.synthesis = Backbone(w_dim=w_dim, img_resolution=backbone_resolution, img_channels=96, **synthesis_kwargs)
+
+        synthesis_kwargs['use_noise'] = False
         self.super_res = SuperResolutionNet(in_channels=nerf_decoder_kwargs['out_c'], w_dim=w_dim, resolution=img_resolution, 
                 use_fp16=False, **synthesis_kwargs)
+
+        synthesis_kwargs['use_noise'] = True
         self.synthesis = SynthesisNetwork(
                     w_dim=w_dim, img_resolution=backbone_resolution, 
                     img_channels=img_channels,
                     num_fp16_res=0,
                     architecture='orig',
                      **synthesis_kwargs)
+                     
         self.num_ws = self.synthesis.num_ws + self.super_res.num_ws  
         self.mapping = MappingNetwork(z_dim=z_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, **mapping_kwargs)
+
         self.nerf_decoder = LightDecoder(**nerf_decoder_kwargs)
+        # self.nerf_decoder = Decoder(**nerf_decoder_kwargs)
+
         self.init_point_kwargs = init_point_kwargs
         self.d_range = init_point_kwargs['d_range']
         # self.nerf_resolution = init_point_kwargs['nerf_resolution']
@@ -221,15 +289,17 @@ class Generator(torch.nn.Module):
         transformed_points = rearrange(transformed_points, "b (h w s) c -> b (h w) s c", h=img_size, s=num_steps)
         transformed_ray_directions_expanded = rearrange(transformed_ray_directions_expanded,
                                                         "b (h w s) c -> b (h w) s c", h=img_size, s=num_steps)
-        transformed_points = transformed_points / 0.15  # 0.12
+        transformed_points = transformed_points / 0.18  # 0.12
 
-         # 插值
+    
+        # 插值
         nerf_feat = self.bilinear_sample_tri_plane(
             transformed_points,
             feat_xy, feat_yz, feat_xz, 
             )  # b*n,c,h,w
         nerf_feat = self.nerf_decoder(nerf_feat)  # bs*n_step, c+1, h, w
 
+        # for debug
         tmp = nerf_feat.reshape(bs, num_steps, nerf_channel+1, img_size, img_size).permute(0, 3,4,1,2)
         print(tmp[..., -1].mean())
         print(F.relu(tmp[..., -1]).mean())
@@ -249,7 +319,7 @@ class Generator(torch.nn.Module):
             transformed_ray_origins=transformed_ray_origins,
             transformed_ray_directions=transformed_ray_directions
             )
-            fine_points = fine_points / 0.15  # # 0.12
+            fine_points = fine_points / 0.18  # # 0.12
             # print(fine_points.shape)
             # print(fine_points.max(), fine_points.min())
             # Model prediction on re-sampled find points
@@ -291,7 +361,16 @@ class Generator(torch.nn.Module):
         # print(pixels_fea)
         gen_high = self.super_res(pixels_fea, ws.contiguous())
         assert gen_high.shape[-1] == 256
-        return gen_high  # b, 3, 256, 256
+        # return gen_high  # b, 3, 256, 256
+
+        gen_low = pixels_fea[:, :3, ...]  # b,c,h,w
+        gen_low = F.interpolate(gen_low, size=(256, 256), mode='bilinear')
+        # return gen_low 
+        gen_img = torch.cat([gen_high, gen_low], dim=1)  # b, 6, h, w
+        return gen_img
+
+
+
 
     # def bilinear_sample_tri_plane(self, points, feat_xy, feat_yz, feat_xz):
     #     b, hw, n = points.shape[:3]
@@ -438,7 +517,7 @@ class EG3dDiscriminator(nn.Module):
         self.dis = Discriminator(
             c_dim=c_dim,
             img_resolution=img_resolution,
-            img_channels=img_channels,
+            img_channels=3,
             architecture = architecture,
             channel_base=channel_base,
             channel_max=channel_max,
@@ -449,6 +528,21 @@ class EG3dDiscriminator(nn.Module):
             mapping_kwargs=mapping_kwargs,
             epilogue_kwargs=epilogue_kwargs,
         )
+        if img_channels == 6:
+            self.dis_aux = Discriminator(
+                c_dim=c_dim,
+                img_resolution=64,
+                img_channels=3,
+                architecture = architecture,
+                channel_base=channel_base,
+                channel_max=channel_max,
+                num_fp16_res=num_fp16_res,
+                conv_clamp=conv_clamp,
+                cmap_dim=cmap_dim,
+                block_kwargs=block_kwargs,
+                mapping_kwargs=mapping_kwargs,
+                epilogue_kwargs=epilogue_kwargs,
+            )
 
     def trans_c_to_matrix(self, c):
         bs = c.shape[0]
@@ -461,18 +555,14 @@ class EG3dDiscriminator(nn.Module):
         bs = img.shape[0]
         c2w_matrix = c2w_matrix.reshape(bs, -1)
         assert c2w_matrix.shape[-1] == 16
-        return self.dis(img, c2w_matrix, update_emas=update_emas, **block_kwargs)
-                                                           
+        
+        if self.d_channel == 3:
+            return self.dis(img, c2w_matrix, update_emas=update_emas, **block_kwargs)
+        else:
+            gen_high, gen_low = img.chunk(2, dim=1)  # b,3,h,w
+            gen_low = F.interpolate(gen_low, scale_factor=0.25, mode='bilinear')
+            x_high = self.dis(gen_high, c2w_matrix, update_emas=update_emas, **block_kwargs)
+            x_low = self.dis_aux(gen_low, c2w_matrix, update_emas=update_emas, **block_kwargs)     
+            return (x_high, x_low)                                      
 
         
-
-
-
-
-
-
-
-
-
-
-    

@@ -17,8 +17,7 @@ import tempfile
 import torch
 
 import dnnlib
-from training import training_loop_eg3d
-from training import training_loop_eg3d_v4
+from training import training_loop_eg3d_full
 from metrics import metric_main
 from torch_utils import training_stats
 from torch_utils import custom_ops
@@ -26,7 +25,7 @@ from torch_utils import custom_ops
 # ----------------------------------------------------------------------------
 
 
-def subprocess_fn(rank, c, temp_dir, version):
+def subprocess_fn(rank, c, temp_dir):
     dnnlib.util.Logger(file_name=os.path.join(
         c.run_dir, 'log.txt'), file_mode='a', should_flush=True)
 
@@ -49,12 +48,13 @@ def subprocess_fn(rank, c, temp_dir, version):
     if rank != 0:
         custom_ops.verbosity = 'none'
 
-    training_loop_eg3d_v4.training_loop(rank=rank, **c)
+    # Execute training loop.
+    training_loop_eg3d_full.training_loop(rank=rank, **c)
 
 # ----------------------------------------------------------------------------
 
 
-def launch_training(c, desc, outdir, dry_run, version):
+def launch_training(c, desc, outdir, dry_run):
     dnnlib.util.Logger(should_flush=True)
 
     # Pick output directory.
@@ -100,10 +100,10 @@ def launch_training(c, desc, outdir, dry_run, version):
     torch.multiprocessing.set_start_method('spawn')
     with tempfile.TemporaryDirectory() as temp_dir:
         if c.num_gpus == 1:
-            subprocess_fn(rank=0, c=c, temp_dir=temp_dir, version=version)
+            subprocess_fn(rank=0, c=c, temp_dir=temp_dir)
         else:
             torch.multiprocessing.spawn(
-                fn=subprocess_fn, args=(c, temp_dir, version), nprocs=c.num_gpus)
+                fn=subprocess_fn, args=(c, temp_dir), nprocs=c.num_gpus)
 
 # ----------------------------------------------------------------------------
 
@@ -142,7 +142,8 @@ def parse_comma_separated_list(s):
 @click.command()
 # Required.
 @click.option('--outdir',       help='Where to save the results', metavar='DIR',                required=True)
-@click.option('--version',      type=click.Choice(['EG3d_v4', 'EG3d_v5']), required=True)
+@click.option('--version',      type=click.Choice(['EG3d_v13']), required=True)
+@click.option('--dchannel',     type=click.IntRange(min=3),                                     default=3)
 @click.option('--cfg',          help='Base configuration',                                      type=click.Choice(['stylegan3-t', 'stylegan3-r', 'stylegan2']), required=True)
 @click.option('--data',         help='Training data', metavar='[ZIP|DIR]',                      type=str, required=True)
 @click.option('--gpus',         help='Number of GPUs to use', metavar='INT',                    type=click.IntRange(min=1), required=True)
@@ -167,13 +168,13 @@ def parse_comma_separated_list(s):
 # Misc settings.
 @click.option('--desc',         help='String to include in result dir name', metavar='STR',     type=str)
 @click.option('--metrics',      help='Quality metrics', metavar='[NAME|A,B,C|none]',            type=parse_comma_separated_list, default='fid50k_full', show_default=True)
-@click.option('--kimg',         help='Total training duration', metavar='KIMG',                 type=click.IntRange(min=1), default=27500, show_default=True)
+@click.option('--kimg',         help='Total training duration', metavar='KIMG',                 type=click.IntRange(min=1), default=25000, show_default=True)
 @click.option('--tick',         help='How often to print progress', metavar='KIMG',             type=click.IntRange(min=1), default=4, show_default=True)
 @click.option('--snap',         help='How often to save snapshots', metavar='TICKS',            type=click.IntRange(min=1), default=50, show_default=True)
 @click.option('--seed',         help='Random seed', metavar='INT',                              type=click.IntRange(min=0), default=0, show_default=True)
 @click.option('--fp32',         help='Disable mixed-precision', metavar='BOOL',                 type=bool, default=False, show_default=True)
 @click.option('--nobench',      help='Disable cuDNN benchmarking', metavar='BOOL',              type=bool, default=False, show_default=True)
-@click.option('--workers',      help='DataLoader worker processes', metavar='INT',              type=click.IntRange(min=1), default=3, show_default=True)
+@click.option('--workers',      help='DataLoader worker processes', metavar='INT',              type=click.IntRange(min=1), default=8, show_default=True)
 @click.option('-n', '--dry-run', help='Print training options and exit',                         is_flag=True)
 def main(**kwargs):
     """Train a GAN using the techniques described in the paper
@@ -203,34 +204,34 @@ def main(**kwargs):
     c = dnnlib.EasyDict()  # Main config dict.
     c.G_kwargs = dnnlib.EasyDict(
         class_name=None, z_dim=512, w_dim=512, mapping_kwargs=dnnlib.EasyDict(), 
-        init_point_kwargs= 
-            dnnlib.EasyDict(
-                fov=12,
-                d_range=(0.88, 1.12),
-                num_steps= 96 #48,  # 实际会有2倍
-        ), # v4动态变化nerf_resolution
+        # init_point_kwargs=dnnlib.EasyDict(
+        #     nerf_resolution=128,
+        #     fov=12,
+        #     d_range=(0.88, 1.12),
+        #     # num_steps=36,  # 实际会有2倍
+        # ),
         use_noise=False,  # 关闭noise
         nerf_decoder_kwargs=dnnlib.EasyDict(
            in_c=32,
            mid_c=64,
            out_c=32, 
         ),
-
         )
+ 
     c.D_kwargs = dnnlib.EasyDict(class_name=f'training.{opts.version}.EG3dDiscriminator', block_kwargs=dnnlib.EasyDict(
-    ), mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
+    ), mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict(), img_channels=opts.dchannel)
     c.G_opt_kwargs = dnnlib.EasyDict(
         class_name='torch.optim.Adam', betas=[0, 0.99], eps=1e-8)
     c.D_opt_kwargs = dnnlib.EasyDict(
         class_name='torch.optim.Adam', betas=[0, 0.99], eps=1e-8)
-    c.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.StyleGAN2Loss')
+    c.loss_kwargs = dnnlib.EasyDict(class_name='training.loss_full.StyleGAN2Loss')
     c.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, prefetch_factor=2)
 
     # Training set.
     c.training_set_kwargs, dataset_name = init_dataset_kwargs(
                 data=opts.data, 
                 cond_data='/home/yangjie08/wuchao/hopenet/ffhq_euler.txt',
-                resolution= 512, # 256,
+                resolution= 256 # 512 # 256, # 256,
                 )
     if opts.cond and not c.training_set_kwargs.use_labels:
         raise click.ClickException(
@@ -245,20 +246,20 @@ def main(**kwargs):
     c.G_kwargs.channel_max = c.D_kwargs.channel_max = opts.cmax
     c.G_kwargs.mapping_kwargs.num_layers = (
         8 if opts.cfg == 'stylegan2' else 2) if opts.map_depth is None else opts.map_depth
-    # c.G_kwargs.init_point_kwargs
+ 
     c.D_kwargs.block_kwargs.freeze_layers = opts.freezed
     c.D_kwargs.epilogue_kwargs.mbstd_group_size = opts.mbstd_group
-    c.loss_kwargs.r1_gamma = 1.0  # opts.gamma
+    c.loss_kwargs.r1_gamma = opts.gamma
     c.G_opt_kwargs.lr = 0.0025
     #(0.0025 if opts.cfg == 'stylegan2' else 0.0025) if opts.glr is None else opts.glr
     c.D_opt_kwargs.lr = 0.002 #  opts.dlr
     c.metrics = opts.metrics
-    c.total_kimg = opts.kimg
-    c.kimg_per_tick = 0.1 # opts.tick
+    c.total_kimg = 27500  #opts.kimg
+    c.kimg_per_tick = opts.tick  # 0.1 for debug
     c.image_snapshot_ticks = 1
     c.network_snapshot_ticks = 50 # opts.snap
     c.random_seed = c.training_set_kwargs.random_seed = opts.seed
-    c.data_loader_kwargs.num_workers =  opts.workers # 不设置为0会报错
+    c.data_loader_kwargs.num_workers =  opts.workers 
 
     # Sanity checks.
     if c.batch_size % c.num_gpus != 0:
@@ -279,7 +280,7 @@ def main(**kwargs):
         # c.G_kwargs.class_name = 'training.networks_stylegan2.Generator'
         c.G_kwargs.class_name = f'training.{opts.version}.Generator'
         # Enable style mixing regularization.
-        c.loss_kwargs.style_mixing_prob = 0.9
+        c.loss_kwargs.style_mixing_prob = 0 # 0.9
         c.loss_kwargs.pl_weight = 2  # Enable path length regularization.
         c.G_reg_interval = 4  # Enable lazy regularization for G.
         # Speed up training by using regular convolutions instead of grouped convolutions.
@@ -330,7 +331,7 @@ def main(**kwargs):
     if opts.desc is not None:
         desc += f'-{opts.desc}'
     # Launch.
-    launch_training(c=c, desc=desc, outdir=os.path.join(opts.outdir, opts.version), dry_run=opts.dry_run, version=opts.version)
+    launch_training(c=c, desc=desc, outdir=os.path.join(opts.outdir, opts.version), dry_run=opts.dry_run)
 # ----------------------------------------------------------------------------
 
 
@@ -338,8 +339,6 @@ if __name__ == "__main__":
     main()  # pylint: disable=no-value-for-parameter
 
 # ----------------------------------------------------------------------------
-# python train_eg3d.py --outdir=~/training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=32 --gamma=1 --mirror=1 --aug=noaug
 
-# python train_eg3d_v4.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=32 --gamma=1 --mirror=0 --aug=noaug --version EG3d_v4
 
-# stylegan3 是如何多并行统计梯度的？ 没有看到调用distributedParalel.
+# python train_eg3d_full.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=32 --gamma=1 --mirror=1 --aug=noaug --version EG3d_v13 --dchannel 6

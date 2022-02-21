@@ -195,7 +195,11 @@ class Generator(torch.nn.Module):
         assert img_size == 64
         self.nerf_resolution = img_size
         num_steps = nerf_init_args['num_steps']
-    
+
+        if 'trans_x' in synthesis_kwargs:
+            trans_x = synthesis_kwargs['trans_x']
+            del synthesis_kwargs['trans_x']
+           
 
         if ws is None:  # mappint network 不使用cond
             ws = self.mapping(z, c=None, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff, update_emas=update_emas)
@@ -220,10 +224,9 @@ class Generator(torch.nn.Module):
                                                         "b (h w s) c -> b (h w) s c", h=img_size, s=num_steps)
         transformed_points = transformed_points / 0.15  # 0.12
 
-        nerf_feat = self.bilinear_sample_tri_plane(
-            transformed_points,
-            feat_xy, feat_yz, feat_xz, 
-            )  # b*n,c,h,w
+        if not self.training:
+            transformed_points += trans_x
+
        
          # 插值
         nerf_feat = self.bilinear_sample_tri_plane(
@@ -247,6 +250,8 @@ class Generator(torch.nn.Module):
             transformed_ray_directions=transformed_ray_directions
             )
             fine_points = fine_points / 0.15  # # 0.12
+            if not self.training:
+                fine_points += trans_x
             # print(fine_points.shape)
             # print(fine_points.max(), fine_points.min())
             # Model prediction on re-sampled find points
@@ -273,7 +278,6 @@ class Generator(torch.nn.Module):
         # 沿用CIPS的代码
         # print(all_outputs)
 
-        # rgb feat 使用了sigmiod，暂不清楚会是什么影响。
         pixels_fea, depth, weights = fancy_integration(
         rgb_sigma=all_outputs,
         # dim_rgb=volume_channel-1,
@@ -413,6 +417,55 @@ class Generator(torch.nn.Module):
         #   transformed_ray_directions_expanded[..., -1] = -1
         #### end new importance sampling
         return fine_points, fine_z_vals
+
+    @torch.no_grad()
+    def get_sigma(self, 
+        z=None, truncation_psi=1, truncation_cutoff=None, 
+        update_emas=True, nerf_init_args={}, **synthesis_kwargs
+    ):
+        img_size = nerf_init_args['img_size']
+        assert img_size == 64
+        self.nerf_resolution = img_size
+        num_steps = 128
+  
+        ws = self.mapping(z, c=None, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff, update_emas=update_emas)
+        # print(ws.keys())
+        backbone_feats = self.synthesis(ws[:, :self.synthesis.num_ws], update_emas=update_emas, **synthesis_kwargs)  # b,32*3,128,128
+        
+        assert backbone_feats.shape[1] == 96
+        feat_xy, feat_yz, feat_xz = backbone_feats.chunk(3, dim=1)  # b, 32, 128, 128
+        assert feat_xy.shape[-1] == 128
+        nerf_channel = feat_xy.shape[1]  # 32
+        bs = feat_xy.shape[0]
+        device = ws.device
+        num_steps = 128
+        x, y, z = torch.meshgrid(torch.linspace(-1, 1, img_size, device=device),
+                          torch.linspace(1, -1, img_size, device=device), 
+                          torch.linspace(-1, 1, num_steps, device=device))
+        transformed_points = torch.stack([x, y, z], dim=-1) # 64x64x64x3
+        transformed_points = transformed_points.view(img_size*img_size, num_steps, 3).unsqueeze(0).expand(bs, -1, -1, -1) # bs, n, s, c
+
+        nerf_feat = self.bilinear_sample_tri_plane(
+            transformed_points,
+            feat_xy, feat_yz, feat_xz, 
+            )  # b*n,c,h,w
+
+        # 插值
+        nerf_feat = self.bilinear_sample_tri_plane(
+            transformed_points,
+            feat_xy, feat_yz, feat_xz, 
+            )  # b*n,c,h,w
+        nerf_feat = self.nerf_decoder(nerf_feat)  # bs*n_step, c+1, h, w
+        volume_channel = nerf_feat.shape[1]
+        h = w = img_size
+        nerf_feat = nerf_feat.reshape(bs, num_steps, volume_channel, h, w).permute(0, 3,4,1,2).\
+                reshape(bs, h*w, num_steps, volume_channel) # b, hw, n, c+1
+        sigmas = nerf_feat[..., -1]
+        sigmas = sigmas.view(bs, img_size, img_size, num_steps)
+        return sigmas
+
+
+
 
 
 

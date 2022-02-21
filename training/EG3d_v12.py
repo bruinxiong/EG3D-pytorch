@@ -10,85 +10,68 @@ from glob import glob
 from training.cips_camera_utils_v2 import  my_get_world_points_and_direction
 from training.pigan_utils import fancy_integration, sample_pdf
 
-# 和v3的区别是
-# 根据在EG3d_based_on_rosinality获得的认识重新修改代码
-# tri-plane的大小调整为128， 射线数目始终为64， 超分辨率两倍 ：加快训练和验证速度
-# lrelu修改为relu
+# 和V7的区别
 
+# 去除style mixing
+# 简化decoder ； From KevinJiang
+# nosie input for stylegan; 【x】去除nerf的noise
+# 高低分辨率结合
+# 归一化系数从0.15 -> 0.22 
 
-# TODO: 1.高低分辨率； 2.random swap
+# TODO： nerf noise越来越小， 水平翻转； random swap;
+# 基于stylegna2-ada写一版
+
 @persistence.persistent_class
-class LightDecoder(nn.Module):
-    def __init__(self, in_c, mid_c, out_c):
+class Decoder(torch.nn.Module):
+    def __init__(self, 
+        in_c: int, 
+        mid_c: int, 
+        out_c: int, 
+        activation='relu', 
+    ):
         super().__init__()
+        num_layers = 3
+        self.num_layers = num_layers
+        self.fc0 = self.create_block(in_c, mid_c, activation=activation)
+        for idx in range(1, num_layers - 1):
+            layer = self.create_block(mid_c, mid_c, activation=activation)
+            setattr(self, f'fc{idx}', layer)
+        setattr(self, f'fc{num_layers - 1}', self.create_block(mid_c, out_c+1, activation='none'))
 
-        self.base = [
-            FullyConnectedLayer(in_c, mid_c, activation='relu'),
-            FullyConnectedLayer(mid_c, mid_c, activation='relu'),
-            FullyConnectedLayer(mid_c, mid_c, activation='relu'),
-        ]
-        for idx in range(len(self.base)):
-            setattr(self, f'base_{idx}', self.base[idx])
-        
-        self.alpha = [
-            FullyConnectedLayer(mid_c, mid_c, activation='relu'),
-            FullyConnectedLayer(mid_c, 1, activation='linear')
-        ]
-        for idx in range(len(self.alpha)):
-            setattr(self, f'alpha_{idx}', self.alpha[idx])
+    def create_block(self, in_features: int, out_features: int, activation: str):
+        if activation == 'relu':
+            return torch.nn.Sequential(
+                torch.nn.Linear(in_features, out_features), 
+                torch.nn.ReLU()
+            )
+        elif activation == 'softmax':
+            return torch.nn.Sequential(
+                torch.nn.Linear(in_features, out_features), 
+                torch.nn.Softmax(dim=-1)
+            )
+        elif activation == 'softplus':
+            return torch.nn.Sequential(
+                torch.nn.Linear(in_features, out_features), 
+                torch.nn.Softplus()
+            )
+        elif activation == 'none':
+            return torch.nn.Linear(in_features, out_features)
+        else:
+            raise NotImplementedError()
+    def forward(self, feature: torch.Tensor):
+        x = feature
 
-        self.rgb = [
-            FullyConnectedLayer(mid_c, mid_c, activation='relu'),
-            FullyConnectedLayer(mid_c, out_c, activation='linear'),
-        ]
-        for idx in range(len(self.rgb)):
-            setattr(self, f'rgb_{idx}', self.rgb[idx])
-        # self.fc1 = FullyConnectedLayer(in_c, mid_c, activation='lrelu')
-        # self.fc2 = FullyConnectedLayer(mid_c, mid_c, activation='lrelu')
-
-        # self.sigma = FullyConnectedLayer(mid_c, 1, activation='linear')
-        # self.fc3 = FullyConnectedLayer(mid_c, out_c, activation='lrelu')
-        # self.feat = FullyConnectedLayer(out_c, out_c, activation='linear')
-
-    def forward(self, x):
         bs_n, c, h, w = x.shape
         x = x.permute(0, 2, 3, 1).reshape(-1, c)
-       
-        for idx in range(len(self.base)):
-            x = getattr(self, f'base_{idx}')(x)
-        feat = x
-        for idx in range(len(self.rgb)):
-            feat = getattr(self, f'rgb_{idx}')(feat)
-        # feat = F.sigmoid(feat)
-        sigma = x
-        for idx in range(len(self.alpha)):
-            sigma = getattr(self, f'alpha_{idx}')(sigma)
-        assert sigma.shape[-1] == 1
-        # sigma = sigma + 5  # for debug  # 20 
-        o = torch.cat([feat, sigma], dim=-1) # bs_n *h*w,  33
+
+        # Main layers
+        for idx in range(self.num_layers - 1):
+            layer = getattr(self, f'fc{idx}')
+            x = layer(x)
+        x = getattr(self, f'fc{self.num_layers - 1}')(x)
+        o = x
         o = o.reshape(bs_n, h, w, 33).permute(0, 3, 1, 2) # bs_n, c ,h, w
         return o
-
-@persistence.persistent_class
-class ToRGB(nn.Module):
-    def __init__(self, in_c, out_c=3):
-        super().__init__()
-        # self.conv1 = Conv2dLayer(in_c, out_c, 1)  # 核为3崩溃，核用1的正常
-        self.fc1 = FullyConnectedLayer(in_c, in_c, activation='relu')
-        self.fc2 = FullyConnectedLayer(in_c, out_c)
-
-
-    def forward(self, x):
-        bs, c, h, w = x.shape
-        x = x.permute(0, 2, 3, 1).reshape(bs * h * w, c)
-        # x = self.conv1(x)
-        x = self.fc1(x)
-        x = self.fc2(x)
-        x = x.reshape(bs, h, w, 3).permute(0, 3, 1, 2)  # b, 3, h, w
-        # x = F.tanh(x)  # -1, 1  # 加入tanh，观察是否能解决训练后期又崩溃的问题
-        return x
-
-
 
 @persistence.persistent_class
 class SuperResolutionNet(nn.Module): # 简化计算量，2倍计算量
@@ -105,19 +88,20 @@ class SuperResolutionNet(nn.Module): # 简化计算量，2倍计算量
         super().__init__()
         self.w_dim = w_dim
         self.num_ws = 0
-        channels_dict = {0: 256, 1:128}
-
+        # channels_dict = {0: 256, 1:128}
+        channels_dict = {128: 256, 256:128, 512:64}
         self.n_layer = 2
         for idx in range(self.n_layer):
             is_last = False if idx < (self.n_layer - 1) else True
-            block = SynthesisBlock(in_channels, channels_dict[idx], w_dim=w_dim, resolution=resolution // (self.n_layer - idx),
+            tar_res = resolution // (self.n_layer - idx)
+            block = SynthesisBlock(in_channels, channels_dict[tar_res], w_dim=w_dim, resolution=tar_res,
                 img_channels=img_channels, is_last=is_last, use_fp16=use_fp16, **block_kwargs)
             setattr(self, f'b{idx}', block)
 
             self.num_ws += block.num_conv
             if is_last:
                 self.num_ws += block.num_torgb
-            in_channels = channels_dict[idx]
+            in_channels = channels_dict[tar_res]
         # for debug
         # self.const = torch.nn.Parameter(torch.randn([32, 128, 128])) 
 
@@ -153,12 +137,13 @@ class Generator(torch.nn.Module):
         img_channels                = 96,  # Number of output color channels.
         backbone_resolution         = 128,  # stylegan2的输出，组成volume,  # 先设置为128，加快训练速度
         mapping_kwargs      = {},   # Arguments for MappingNetwork.
-        init_point_kwargs   = {},
         nerf_decoder_kwargs      = {},
         rank = None,
         **synthesis_kwargs,         # Arguments for SynthesisNetwork.
     ):        
         super().__init__()
+        backbone_resolution = 128
+        img_resolution = 256
         self.rank = rank
         self.z_dim = z_dim
         self.c_dim = c_dim
@@ -166,24 +151,22 @@ class Generator(torch.nn.Module):
         self.img_resolution = img_resolution
         self.img_channels = img_channels
         self.backbone_resolution = backbone_resolution
-        # self.synthesis = Backbone(w_dim=w_dim, img_resolution=backbone_resolution, img_channels=96, **synthesis_kwargs)
+        synthesis_kwargs['use_noise'] = False
         self.super_res = SuperResolutionNet(in_channels=nerf_decoder_kwargs['out_c'], w_dim=w_dim, resolution=img_resolution, 
                 use_fp16=False, **synthesis_kwargs)
+        synthesis_kwargs['use_noise'] = True
         self.synthesis = SynthesisNetwork(
                     w_dim=w_dim, img_resolution=backbone_resolution, 
                     img_channels=img_channels,
                     num_fp16_res=0,
-                    architecture='orig',
                      **synthesis_kwargs)
         self.num_ws = self.synthesis.num_ws + self.super_res.num_ws  
         self.mapping = MappingNetwork(z_dim=z_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, **mapping_kwargs)
-        self.nerf_decoder = LightDecoder(**nerf_decoder_kwargs)
-        self.init_point_kwargs = init_point_kwargs
-        self.d_range = init_point_kwargs['d_range']
-        # self.nerf_resolution = init_point_kwargs['nerf_resolution']
 
-        # self.aux_to_rgb = ToRGB(32, 3)
-        # self.aux_to_rgb = ToRGBLayer(32, 3, 0)
+        # self.nerf_decoder = LightDecoder(**nerf_decoder_kwargs)
+        self.nerf_decoder = Decoder(**nerf_decoder_kwargs)
+       
+        
 
     def trans_c_to_matrix(self, c):
         bs = c.shape[0]
@@ -194,21 +177,32 @@ class Generator(torch.nn.Module):
     def forward(self, z=None, angles=None, ws=None, truncation_psi=1, truncation_cutoff=None, 
                 update_emas=True, nerf_init_args={}, **synthesis_kwargs
                 ):
+        nerf_init_args = {}
+        nerf_init_args['num_steps'] = 32
+        nerf_init_args['img_size'] = 64  # nerf光线数目
+        nerf_init_args['fov'] = 13.6
+        nerf_init_args['nerf_noise'] =1.0 # 去除noise
+        nerf_init_args['ray_start'] = 0.88
+        nerf_init_args['ray_end'] = 1.12
         img_size = nerf_init_args['img_size']
-        assert img_size == 64
         self.nerf_resolution = img_size
         num_steps = nerf_init_args['num_steps']
     
-
-        if ws is None:  # mappint network 不使用cond
-            ws = self.mapping(z, c=None, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff, update_emas=update_emas)
+        
+        if ws is None: 
+            assert not self.training # 只有测试阶段走这条分支
+            cond = torch.zeros_like(angles)
+            bs = cond.shape[0]
+            cond = self.trans_c_to_matrix(cond).reshape(bs, 16)
+            ws = self.mapping(z, c=cond, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff, update_emas=update_emas)
         # print(ws.keys())
         backbone_feats = self.synthesis(ws[:, :self.synthesis.num_ws], update_emas=update_emas, **synthesis_kwargs)  # b,32*3,128,128
         
         assert backbone_feats.shape[1] == 96
         feat_xy, feat_yz, feat_xz = backbone_feats.chunk(3, dim=1)  # b, 32, 128, 128
-        assert feat_xy.shape[-1] == 128
+        # assert feat_xy.shape[-1] == 256
         nerf_channel = feat_xy.shape[1]  # 32
+
         bs = feat_xy.shape[0]
         if angles is not None:
             assert angles.shape[1] == 3
@@ -219,9 +213,9 @@ class Generator(torch.nn.Module):
                     my_get_world_points_and_direction(batch_size=bs, device=ws.device, c2w_matrix=c2w_matrix, **nerf_init_args)
 
         transformed_points = rearrange(transformed_points, "b (h w s) c -> b (h w) s c", h=img_size, s=num_steps)
-        transformed_ray_directions_expanded = rearrange(transformed_ray_directions_expanded,
-                                                        "b (h w s) c -> b (h w) s c", h=img_size, s=num_steps)
-        transformed_points = transformed_points / 0.15  # 0.12
+        # transformed_ray_directions_expanded = rearrange(transformed_ray_directions_expanded,
+        #                                                 "b (h w s) c -> b (h w) s c", h=img_size, s=num_steps)
+        transformed_points = transformed_points / 0.22  # 0.12
 
          # 插值
         nerf_feat = self.bilinear_sample_tri_plane(
@@ -230,15 +224,16 @@ class Generator(torch.nn.Module):
             )  # b*n,c,h,w
         nerf_feat = self.nerf_decoder(nerf_feat)  # bs*n_step, c+1, h, w
 
-        tmp = nerf_feat.reshape(bs, num_steps, nerf_channel+1, img_size, img_size).permute(0, 3,4,1,2)
-        print(tmp[..., -1].mean())
-        print(F.relu(tmp[..., -1]).mean())
+        # tmp = nerf_feat.reshape(bs, num_steps, nerf_channel+1, img_size, img_size).permute(0, 3,4,1,2)
+        # print(tmp[..., -1].mean())
+        # print(F.relu(tmp[..., -1]).mean())
 
         volume_channel = nerf_feat.shape[1]
         h = w = img_size
         nerf_feat = nerf_feat.reshape(bs, num_steps, volume_channel, h, w).permute(0, 3,4,1,2).\
                 reshape(bs, h*w, num_steps, volume_channel) # b, hw, n, c+1
-    
+        print(nerf_feat[..., -1].mean())
+        print(F.relu(nerf_feat[..., -1]).mean())    
         if True:
             fine_points, fine_z_vals = self.get_fine_points_and_direction(
             coarse_output=nerf_feat,
@@ -249,7 +244,7 @@ class Generator(torch.nn.Module):
             transformed_ray_origins=transformed_ray_origins,
             transformed_ray_directions=transformed_ray_directions
             )
-            fine_points = fine_points / 0.15  # # 0.12
+            fine_points = fine_points / 0.22  # # 0.12
             # print(fine_points.shape)
             # print(fine_points.max(), fine_points.min())
             # Model prediction on re-sampled find points
@@ -269,12 +264,7 @@ class Generator(torch.nn.Module):
         else:
             all_outputs = nerf_feat
             all_z_vals = z_vals
-        # if self.rank == 0:
-        #     print(333)
-        #     print(fine_nerf_feat[0,5, 0, :], fine_nerf_feat[0,90, 2, :])
-        # 开始volume rendering，这里直接使用CIPS3d的代码 # 需要好好阅读一下giffare，CIPS，GRAF的代码
-        # 沿用CIPS的代码
-        # print(all_outputs)
+      
         pixels_fea, depth, weights = fancy_integration(
         rgb_sigma=all_outputs,
         # dim_rgb=volume_channel-1,
@@ -284,14 +274,27 @@ class Generator(torch.nn.Module):
         pixels_fea = pixels_fea.reshape(bs, h, w, -1).permute(0, 3, 1, 2)
         pixels_fea = pixels_fea.contiguous()
 
-
         ws = ws[:, self.synthesis.num_ws:]  # 超分辨率的ws
         # print(pixels_fea[0, :, 5, 10])
         # print(pixels_fea[0, :, 32, 56])
         # print(pixels_fea)
         gen_high = self.super_res(pixels_fea, ws.contiguous())
-        assert gen_high.shape[-1] == 256
-        return gen_high  # b, 3, 256, 256
+        # assert gen_high.shape[-1] == 512
+        # assert pixels_fea.shape[-1] == 128
+        # return gen_high  # b, 3, 256, 256
+
+        gen_low = pixels_fea[: ,:3]
+        # 加入激活函数
+        # gen_low = torch.sigmoid(gen_low) * 2 - 1
+
+        gen_low = F.interpolate(gen_low, size=(256, 256), mode='nearest')
+        gen_img = torch.cat([gen_high, gen_low], dim=1) # b, 6, 512, 512
+
+        # gen_img = torch.tanh(gen_img)
+
+        return gen_img
+
+
 
     # def bilinear_sample_tri_plane(self, points, feat_xy, feat_yz, feat_xz):
     #     b, hw, n = points.shape[:3]
@@ -434,6 +437,7 @@ class EG3dDiscriminator(nn.Module):
         epilogue_kwargs     = {},       # Arguments for DiscriminatorEpilogue.):
     ):
         super().__init__()
+        num_fp16_res = 0
         self.d_channel = img_channels
         self.dis = Discriminator(
             c_dim=c_dim,

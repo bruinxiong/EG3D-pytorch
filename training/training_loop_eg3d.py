@@ -44,7 +44,7 @@ def setup_snapshot_image_grid(num=4, device=torch.device('cpu'),random_seed=0):
     # Load data.
     # images, labels = zip(*[training_set[i] for i in grid_indices])
     # return (gw, gh), 
-    return (gh, gw), conds
+    return [gh, gw], conds
 
 
 
@@ -143,7 +143,7 @@ def training_loop(
     nerf_init_args['ray_start'] = 0.88
     nerf_init_args['ray_end'] = 1.12
     nerf_init_args['fov'] = 12
-    common_kwargs = dict(c_dim=0, #12,  尝试一下G不用cond
+    common_kwargs = dict(c_dim=16, #12,  尝试一下G不用cond
         img_resolution=training_set.resolution, 
         img_channels= 96,
         backbone_resolution=128,
@@ -151,7 +151,7 @@ def training_loop(
      )
     common_kwargs_for_D = dict(c_dim=16, #12, 
         img_resolution=training_set.resolution, 
-        img_channels=3,  # 先尝试使用单张图训练， TODO：高低分辨率都使用单独的判别器
+        # img_channels=3,  # 先尝试使用单张图训练， TODO：高低分辨率都使用单独的判别器
      )
     G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
     D = dnnlib.util.construct_class_by_name(**D_kwargs, **common_kwargs_for_D).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
@@ -232,9 +232,12 @@ def training_loop(
         meta_data = {'noise_mode': 'const'}
         total_imgs = []
         for c in grid_c:
-            images = G_ema(z=grid_z, angles=c, nerf_init_args=nerf_init_args, **meta_data)[:, :3]  # b,3,h,w
+            images = G_ema(z=grid_z, angles=c, nerf_init_args=nerf_init_args, **meta_data)  # b,3,h,w
             res = images.shape[-1]
             # save_image_grid(images, os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
+            if images.shape[1] == 6:
+                images = images.reshape(num*2, 3, res, res)
+                grid_size[0] = num * 2
             total_imgs.append(images)
         total_imgs = torch.stack(total_imgs, dim=1).reshape(grid_size[0]*grid_size[1], 3, res, res).cpu().numpy()  # b*5, 3,h,w
         save_image_grid(total_imgs, os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
@@ -378,9 +381,12 @@ def training_loop(
             meta_data = {'noise_mode': 'const'}
             total_imgs = []
             for c in grid_c:
-                images = G_ema(z=grid_z, angles=c, nerf_init_args=nerf_init_args, **meta_data)[:, :3]  # b,3,h,w
+                images = G_ema(z=grid_z, angles=c, nerf_init_args=nerf_init_args, **meta_data)  # b,3,h,w
                 # images = G(z=grid_z, c=c, **meta_data)[:, :3]  # b,3,h,w
                 res = images.shape[-1]
+                if images.shape[1] == 6:
+                    images = images.reshape(num*2, 3, res, res)
+                    grid_size[0] = num * 2
                 # save_image_grid(images, os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
                 total_imgs.append(images)
             total_imgs = torch.stack(total_imgs, dim=1).reshape(grid_size[0]*grid_size[1], 3, res, res).cpu().numpy()  # b*5, 3,h,w

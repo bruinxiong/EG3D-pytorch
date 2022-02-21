@@ -272,9 +272,9 @@ class ImageFolderDataset(Dataset):
         fname = os.path.basename(fname)
         cond = self.cond_set[fname]
         # cond = torch.tensor([0.0,0.0,0.0])
-        # if self._xflip[idx]:  # 差点忘记要反转y轴
-        #     cond[1] *= -1.0
-        assert self._xflip[idx] == 0  # 暂时不允许有x轴反转
+        if self._xflip[idx]:  # 差点忘记要反转y轴
+            cond[1] *= -1.0
+        # assert self._xflip[idx] == 0  # 暂时不允许有x轴反转
         return torch.from_numpy(cond).float()
 
 #----------------------------------------------------------------------------

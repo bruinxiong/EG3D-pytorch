@@ -142,7 +142,9 @@ def parse_comma_separated_list(s):
 @click.command()
 # Required.
 @click.option('--outdir',       help='Where to save the results', metavar='DIR',                required=True)
-@click.option('--version',      type=click.Choice(['EG3d_v2', 'EG3d_v3', 'EG3d_v7', 'EG3d_v8']), required=True)
+@click.option('--version',      type=click.Choice(['EG3d_v14', 'EG3d_v7', 'EG3d_v8', 'EG3d_v12']), required=True)
+@click.option('--dchannel',     type=click.IntRange(min=3),                                     default=3)
+@click.option('--resolution',     type=click.IntRange(min=64),                                   required=True)
 @click.option('--cfg',          help='Base configuration',                                      type=click.Choice(['stylegan3-t', 'stylegan3-r', 'stylegan2']), required=True)
 @click.option('--data',         help='Training data', metavar='[ZIP|DIR]',                      type=str, required=True)
 @click.option('--gpus',         help='Number of GPUs to use', metavar='INT',                    type=click.IntRange(min=1), required=True)
@@ -173,7 +175,7 @@ def parse_comma_separated_list(s):
 @click.option('--seed',         help='Random seed', metavar='INT',                              type=click.IntRange(min=0), default=0, show_default=True)
 @click.option('--fp32',         help='Disable mixed-precision', metavar='BOOL',                 type=bool, default=False, show_default=True)
 @click.option('--nobench',      help='Disable cuDNN benchmarking', metavar='BOOL',              type=bool, default=False, show_default=True)
-@click.option('--workers',      help='DataLoader worker processes', metavar='INT',              type=click.IntRange(min=1), default=3, show_default=True)
+@click.option('--workers',      help='DataLoader worker processes', metavar='INT',              type=click.IntRange(min=1), default=8, show_default=True)
 @click.option('-n', '--dry-run', help='Print training options and exit',                         is_flag=True)
 def main(**kwargs):
     """Train a GAN using the techniques described in the paper
@@ -203,22 +205,22 @@ def main(**kwargs):
     c = dnnlib.EasyDict()  # Main config dict.
     c.G_kwargs = dnnlib.EasyDict(
         class_name=None, z_dim=512, w_dim=512, mapping_kwargs=dnnlib.EasyDict(), 
-        init_point_kwargs=dnnlib.EasyDict(
-            nerf_resolution=128,
-            fov=12,
-            d_range=(0.88, 1.12),
-            # num_steps=36,  # 实际会有2倍
-        ),
+        # init_point_kwargs=dnnlib.EasyDict(
+        #     nerf_resolution=128,
+        #     fov=12,
+        #     d_range=(0.88, 1.12),
+        #     # num_steps=36,  # 实际会有2倍
+        # ),
         use_noise=False,  # 关闭noise
         nerf_decoder_kwargs=dnnlib.EasyDict(
            in_c=32,
            mid_c=64,
            out_c=32, 
         ),
-
         )
+ 
     c.D_kwargs = dnnlib.EasyDict(class_name=f'training.{opts.version}.EG3dDiscriminator', block_kwargs=dnnlib.EasyDict(
-    ), mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
+    ), mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict(), img_channels=opts.dchannel)
     c.G_opt_kwargs = dnnlib.EasyDict(
         class_name='torch.optim.Adam', betas=[0, 0.99], eps=1e-8)
     c.D_opt_kwargs = dnnlib.EasyDict(
@@ -230,7 +232,7 @@ def main(**kwargs):
     c.training_set_kwargs, dataset_name = init_dataset_kwargs(
                 data=opts.data, 
                 cond_data='/home/yangjie08/wuchao/hopenet/ffhq_euler.txt',
-                resolution=64, # 256,
+                resolution= opts.resolution, # 512 # 256, # 256,
                 )
     if opts.cond and not c.training_set_kwargs.use_labels:
         raise click.ClickException(
@@ -245,10 +247,10 @@ def main(**kwargs):
     c.G_kwargs.channel_max = c.D_kwargs.channel_max = opts.cmax
     c.G_kwargs.mapping_kwargs.num_layers = (
         8 if opts.cfg == 'stylegan2' else 2) if opts.map_depth is None else opts.map_depth
-    # c.G_kwargs.init_point_kwargs
+ 
     c.D_kwargs.block_kwargs.freeze_layers = opts.freezed
     c.D_kwargs.epilogue_kwargs.mbstd_group_size = opts.mbstd_group
-    c.loss_kwargs.r1_gamma = 1.0  # opts.gamma
+    c.loss_kwargs.r1_gamma = opts.gamma
     c.G_opt_kwargs.lr = 0.0025
     #(0.0025 if opts.cfg == 'stylegan2' else 0.0025) if opts.glr is None else opts.glr
     c.D_opt_kwargs.lr = 0.002 #  opts.dlr
@@ -279,7 +281,7 @@ def main(**kwargs):
         # c.G_kwargs.class_name = 'training.networks_stylegan2.Generator'
         c.G_kwargs.class_name = f'training.{opts.version}.Generator'
         # Enable style mixing regularization.
-        c.loss_kwargs.style_mixing_prob = 0.9
+        c.loss_kwargs.style_mixing_prob = 0 # 0.9
         c.loss_kwargs.pl_weight = 2  # Enable path length regularization.
         c.G_reg_interval = 4  # Enable lazy regularization for G.
         # Speed up training by using regular convolutions instead of grouped convolutions.
@@ -341,4 +343,10 @@ if __name__ == "__main__":
 
 # python train_eg3d.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=64 --gamma=1 --mirror=0 --aug=noaug
 # python train_eg3d.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=64 --gamma=1 --mirror=0 --aug=noaug --version EG3d_v7
+# python train_eg3d.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=64 --gamma=1 --mirror=0 --aug=noaug --version EG3d_v9 --dchannel 6
+# python train_eg3d.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=64 --gamma=1 --mirror=0 --aug=noaug --version EG3d_v10 --dchannel 6
 
+# python train_eg3d.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=32 --gamma=1 --mirror=0 --aug=noaug --version EG3d_v11 --dchannel 6
+# python train_eg3d.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=64 --gamma=1 --mirror=0 --aug=noaug --version EG3d_v12 --dchannel 6
+
+# python train_eg3d.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=32 --gamma=1 --mirror=0 --aug=noaug --version EG3d_v14 --dchannel 3 --resolution 128

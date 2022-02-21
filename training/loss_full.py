@@ -14,7 +14,8 @@ from torch import random
 from torch_utils import training_stats
 from torch_utils.ops import conv2d_gradfix
 from torch_utils.ops import upfirdn2d
-from random import randint
+# from random import randint
+import numpy as np
 from training.camera_utils import get_cam2world_matrix
 from torch.nn import functional as F
 from torchvision.utils import save_image
@@ -43,12 +44,17 @@ class StyleGAN2Loss(Loss):
         self.pl_decay           = pl_decay
         self.pl_no_weight_grad  = pl_no_weight_grad
         self.pl_mean            = torch.zeros([], device=device)
-        self.blur_init_sigma    = 10 # blur_init_sigma
-        self.blur_fade_kimg     = 200 # blur_fade_kimg
+        self.blur_init_sigma    = blur_init_sigma
+        self.blur_fade_kimg     = blur_fade_kimg
         self.rank = rank
         self.network_type = 'eg3d'
-        
+        self.nerf_init_args = {}
+        self.random_swap_prob = 0.5
+    
+    def set_nerf_init_args(self, nerf_init_args):
+        self.nerf_init_args = nerf_init_args  # 只更新img size 和nerf noise
 
+ 
     def trans_c_to_matrix(self, c):
         bs = c.shape[0]
         c = get_cam2world_matrix(c, device=c.device)  #  [:, :3]  # b, 3, 4
@@ -56,27 +62,22 @@ class StyleGAN2Loss(Loss):
 
 
     def run_G(self, z, c1, c2=None, update_emas=False, global_step=None, nerf_resolution=64):
+        bs = z.shape[0]
         angles = c1
-        c1 = self.trans_c_to_matrix(c1)
-        bs = c1.shape[0]
-        c1 = c1.reshape(bs, 16)
-        ws = self.G.mapping(z, c1, update_emas=update_emas)
+        # random swap
+        swap_idx = torch.where(torch.rand(size=(bs,)) < 0.5)[0]
+        cond = c1.clone()
+        cond[swap_idx] = c2[swap_idx]
+        cond = self.trans_c_to_matrix(cond).reshape(bs, 16)
+        ws = self.G.mapping(z, cond, update_emas=update_emas)
+
         # if self.style_mixing_prob > 0:
         #     with torch.autograd.profiler.record_function('style_mixing'):
         #         cutoff = torch.empty([], dtype=torch.int64, device=ws.device).random_(1, ws.shape[1])
         #         cutoff = torch.where(torch.rand([], device=ws.device) < self.style_mixing_prob, cutoff, torch.full_like(cutoff, ws.shape[1]))
         #         ws[:, cutoff:] = self.G.mapping(torch.randn_like(z), c1, update_emas=False)[:, cutoff:]
         if self.network_type == 'eg3d':
-            bs = z.shape[0]
-            nerf_init_args = {}
-            nerf_init_args['num_steps'] = 36
-            nerf_init_args['img_size'] = nerf_resolution
-            nerf_init_args['fov'] = 12
-            nerf_init_args['nerf_noise'] = 0.5
-            nerf_init_args['ray_start'] = 0.88
-            nerf_init_args['ray_end'] = 1.12
-
-            imgs = self.G(angles=angles, ws=ws, update_emas=update_emas, nerf_init_args=nerf_init_args) # b,3,h,w
+            imgs = self.G(angles=angles, ws=ws, update_emas=update_emas, nerf_init_args=self.nerf_init_args) # b,3,h,w
         else:
             imgs = self.G.synthesis(ws, update_emas=update_emas)
         return imgs, ws
@@ -98,19 +99,28 @@ class StyleGAN2Loss(Loss):
             phase = {'Greg': 'none', 'Gboth': 'Gmain'}.get(phase, phase)
         if self.r1_gamma == 0:
             phase = {'Dreg': 'none', 'Dboth': 'Dmain'}.get(phase, phase)
-        blur_sigma = max(1 - cur_nimg / (self.blur_fade_kimg * 1e3), 0) * self.blur_init_sigma if self.blur_fade_kimg > 0 else 0
+        blur_sigma = 0  #  max(1 - cur_nimg / (self.blur_fade_kimg * 1e3), 0) * self.blur_init_sigma if self.blur_fade_kimg > 0 else 0
         assert self.network_type == 'eg3d'
+        # cond_1 = self.trans_c_to_matrix(gen_c1, random_swap_prob=0) # nerf的输入
+        # cond_2 = self.trans_c_to_matrix(gen_c1, gen_c2, random_swap_prob)  # mapping net的输入
+        # real_c = self.trans_c_to_matrix(real_c)
         # Gmain: Maximize logits for generated images.
         if phase in ['Gmain', 'Gboth']:
             with torch.autograd.profiler.record_function('Gmain_forward'):
-                gen_img, _gen_ws = self.run_G(gen_z, c1=gen_c1, c2=None, global_step=cur_nimg, nerf_resolution=nerf_resolution)
+                gen_img, _gen_ws = self.run_G(gen_z, c1=gen_c1, c2=gen_c2, global_step=cur_nimg, nerf_resolution=nerf_resolution)
                 gen_logits = self.run_D(gen_img, gen_c1, blur_sigma=blur_sigma)
-             
-                training_stats.report('Loss/scores/fake', gen_logits)
-                training_stats.report('Loss/signs/fake', gen_logits.sign())
-                loss_Gmain = torch.nn.functional.softplus(-gen_logits) # -log(sigmoid(gen_logits))
-                training_stats.report('Loss/G/loss', loss_Gmain)
-    
+                if not isinstance(gen_logits, tuple):
+                    training_stats.report('Loss/scores/fake', gen_logits)
+                    training_stats.report('Loss/signs/fake', gen_logits.sign())
+                    loss_Gmain = torch.nn.functional.softplus(-gen_logits) # -log(sigmoid(gen_logits))
+                    training_stats.report('Loss/G/loss', loss_Gmain)
+                else:
+                    gen_logits_high, gen_logits_low = gen_logits
+                    training_stats.report('Loss/scores/fake', gen_logits_high)
+                    training_stats.report('Loss/signs/fake', gen_logits_high.sign())
+                    loss_Gmain = 0.5*(torch.nn.functional.softplus(-gen_logits_high)  + torch.nn.functional.softplus(-gen_logits_low)) # -log(sigmoid(gen_logits))
+                    training_stats.report('Loss/G/loss', loss_Gmain)
+
                 # if self.rank == 0:
                 #     b = gen_img.shape[0]
                 #     tmp = gen_img.reshape(b, 2, 3, 256, 256).reshape(b*2, 3, 256, 256)
@@ -148,13 +158,17 @@ class StyleGAN2Loss(Loss):
         loss_Dgen = 0
         if phase in ['Dmain', 'Dboth']:
             with torch.autograd.profiler.record_function('Dgen_forward'):
-                gen_img, _gen_ws = self.run_G(gen_z, gen_c1, c2=None, update_emas=True, global_step=cur_nimg, nerf_resolution=nerf_resolution)
+                gen_img, _gen_ws = self.run_G(gen_z, gen_c1, c2=gen_c2, update_emas=True, global_step=cur_nimg, nerf_resolution=nerf_resolution)
                 gen_logits = self.run_D(gen_img, gen_c1, blur_sigma=blur_sigma, update_emas=True)
-            
-                training_stats.report('Loss/scores/fake', gen_logits)
-                training_stats.report('Loss/signs/fake', gen_logits.sign())
-                loss_Dgen = torch.nn.functional.softplus(gen_logits) # -log(1 - sigmoid(gen_logits))
-        
+                if not isinstance(gen_logits, tuple):
+                    training_stats.report('Loss/scores/fake', gen_logits)
+                    training_stats.report('Loss/signs/fake', gen_logits.sign())
+                    loss_Dgen = torch.nn.functional.softplus(gen_logits) # -log(1 - sigmoid(gen_logits))
+                else:
+                    gen_logits_high, gen_logits_low = gen_logits
+                    training_stats.report('Loss/scores/fake', gen_logits_high)
+                    training_stats.report('Loss/signs/fake', gen_logits_high.sign())
+                    loss_Dgen = 0.5*(torch.nn.functional.softplus(gen_logits_high) + torch.nn.functional.softplus(gen_logits_low)) # -log(1 - sigmoid(gen_logits))
             with torch.autograd.profiler.record_function('Dgen_backward'):
                 loss_Dgen.mean().mul(gain).backward()
 
@@ -165,8 +179,8 @@ class StyleGAN2Loss(Loss):
             with torch.autograd.profiler.record_function(name + '_forward'):
                 real_img_tmp = real_img.detach().requires_grad_(phase in ['Dreg', 'Dboth'])
                 if self.D.d_channel == 6: # 使用两个判别器
-                    real_low = F.interpolate(real_img_tmp, scale_factor=0.25)
-                    real_low = F.interpolate(real_low, scale_factor=4)
+                    real_low = F.interpolate(real_img_tmp, scale_factor=0.5, mode='nearest')
+                    real_low = F.interpolate(real_low, scale_factor=2, mode='nearest')
                     real_img_tmp = torch.cat([real_img_tmp.detach(), real_low.detach()], dim=1).requires_grad_(phase in ['Dreg', 'Dboth'])
                 # if self.network_type == 'eg3d':
                     # real_img_tmp_resize = F.interpolate(F.interpolate(real_img_tmp, scale_factor=0.5), scale_factor=2.0)
@@ -185,11 +199,20 @@ class StyleGAN2Loss(Loss):
                     #         )
                 loss_Dreal = 0
                 real_logits = self.run_D(real_img_tmp, real_c, blur_sigma=blur_sigma)
-                training_stats.report('Loss/scores/real', real_logits)
-                training_stats.report('Loss/signs/real', real_logits.sign())
-                if phase in ['Dmain', 'Dboth']:
-                    loss_Dreal = torch.nn.functional.softplus(-real_logits) # -log(sigmoid(real_logits))
-                    training_stats.report('Loss/D/loss', loss_Dgen + loss_Dreal)
+                if not isinstance(real_logits, tuple):
+                    training_stats.report('Loss/scores/real', real_logits)
+                    training_stats.report('Loss/signs/real', real_logits.sign())
+                    if phase in ['Dmain', 'Dboth']:
+                        loss_Dreal = torch.nn.functional.softplus(-real_logits) # -log(sigmoid(real_logits))
+                        training_stats.report('Loss/D/loss', loss_Dgen + loss_Dreal)
+                else:
+                    real_logits_high, real_logits_low = real_logits
+                    training_stats.report('Loss/scores/real', real_logits_high)
+                    training_stats.report('Loss/signs/real', real_logits_high.sign())
+                    if phase in ['Dmain', 'Dboth']:
+                        loss_Dreal = 0.5 * (torch.nn.functional.softplus(-real_logits_high) + torch.nn.functional.softplus(-real_logits_low)) # -log(sigmoid(real_logits))
+                        training_stats.report('Loss/D/loss', loss_Dgen + loss_Dreal)
+
 
                 loss_Dr1 = 0
                 if phase in ['Dreg', 'Dboth']:

@@ -4,6 +4,11 @@ env.md
 datasets/
 ~/
 training-runs/
+gen_video_examples/
+*.jpg
+*.png
+*.mp4
+march_file.npy
 # system ignore
 .DS_Store
 ._.DS_Store

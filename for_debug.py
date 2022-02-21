@@ -76,6 +76,6 @@ grid_c = torch.tensor([0,0,0]).reshape(1, -1).expand(gh, -1).cuda() # 4, 3
 meta_data = {'noise_mode': 'const'}
 with torch.no_grad():
     gen_imgs = G(grid_z, grid_c, nerf_init_args=nerf_init_args, **meta_data)[:, :3] # gh, 3, h, w
-    # print(gen_imgs.shape, gen_imgs.max(), gen_imgs.min())
+    # print(gen_imgs.shape, gen_imgs.max(), bgen_imgs.min())
 save_image_grid(gen_imgs.cpu().numpy(), 'example.png', (-1, 1), (1, gh))
 
