@@ -1,3 +1,40 @@
+# Unofficial EG3D ReadMe
+This repo partly reproduces the paper "Efficient Geometry-aware 3D Generative Adversarial Networks", which includes:
+
+* tri-plane bilinear features.
+* StyleGAN-2 Generator.
+* 2 style blocks as super-resolution module.
+* extracted Face gaze of FFHQ, which is writed to a txt file "ffhq_euler.txt".
+  
+which not include:
+
+* I only use high resolution to calculate the GAN loss, so the result is little view-inconsistent. 
+* Hyperparams and details are not all same as the paper.
+
+# Demo video example
+https://www.youtube.com/shorts/jdg_iEjGzdg
+
+# How to train
+I use 8 v100 GPUS(32G). The training time is slower than time paper described. 
+Note that please modify the arg "--data" by your FFHQ dataset.
+
+> python train_eg3d_full.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=32 --gamma=1 --aug=noaug --version EG3d_v16 --dchannel 3 --resolution 512  --mirror 1
+
+# How to Test
+I provide a pretrained model, which you can find [here](https://drive.google.com/file/d/1seSKSRM8EwgQdXt8siNWJcUsU-e6cUKG/view?usp=sharing)
+
+Before run the following code, please modify the Line 61 with your pretrained model path. 
+
+> python test_eg3d_new.py
+
+
+
+
+
+
+
+
+# Original StyleGAN3 README
 ## Alias-Free Generative Adversarial Networks (StyleGAN3)<br><sub>Official PyTorch implementation of the NeurIPS 2021 paper</sub>
 
 ![Teaser image](./docs/stylegan3-teaser-1920x1006.png)

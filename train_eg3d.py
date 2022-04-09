@@ -142,8 +142,9 @@ def parse_comma_separated_list(s):
 @click.command()
 # Required.
 @click.option('--outdir',       help='Where to save the results', metavar='DIR',                required=True)
-@click.option('--version',      type=click.Choice(['EG3d_v14', 'EG3d_v7', 'EG3d_v8', 'EG3d_v12']), required=True)
-@click.option('--dchannel',     type=click.IntRange(min=3),                                     default=3)
+@click.option('--version',      type=click.Choice(['EG3d_v14', 'EG3d_v7', 'EG3d_v8', 'EG3d_v12','EG3d_v18']), required=True)
+@click.option('--dchannel',     type=click.IntRange(min=3),                                     default=3) 
+@click.option('--random-swap-prob',     type=click.FloatRange(min=0),                                     default=0.0) 
 @click.option('--resolution',     type=click.IntRange(min=64),                                   required=True)
 @click.option('--cfg',          help='Base configuration',                                      type=click.Choice(['stylegan3-t', 'stylegan3-r', 'stylegan2']), required=True)
 @click.option('--data',         help='Training data', metavar='[ZIP|DIR]',                      type=str, required=True)
@@ -225,7 +226,7 @@ def main(**kwargs):
         class_name='torch.optim.Adam', betas=[0, 0.99], eps=1e-8)
     c.D_opt_kwargs = dnnlib.EasyDict(
         class_name='torch.optim.Adam', betas=[0, 0.99], eps=1e-8)
-    c.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.StyleGAN2Loss')
+    c.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.StyleGAN2Loss', random_swap_prob=opts.random_swap_prob)
     c.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, prefetch_factor=2)
 
     # Training set.
@@ -347,6 +348,9 @@ if __name__ == "__main__":
 # python train_eg3d.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=64 --gamma=1 --mirror=0 --aug=noaug --version EG3d_v10 --dchannel 6
 
 # python train_eg3d.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=32 --gamma=1 --mirror=0 --aug=noaug --version EG3d_v11 --dchannel 6
-# python train_eg3d.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=64 --gamma=1 --mirror=0 --aug=noaug --version EG3d_v12 --dchannel 6
+# python train_eg3d.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=64 --gamma=1 --mirror=0 --aug=noaug --version EG3d_v12 --dchannel 6 --resolution 256
+# python train_eg3d.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=32 --gamma=1 --aug=noaug --version EG3d_v18 --dchannel 6 --resolution 512 --mirror 1 
 
-# python train_eg3d.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=32 --gamma=1 --mirror=0 --aug=noaug --version EG3d_v14 --dchannel 3 --resolution 128
+# python train_eg3d.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=32 --gamma=1 --aug=noaug --version EG3d_v14 --dchannel 3 --resolution 128 --random-swap-prob 0.5 --mirror 1
+
+# python train_eg3d.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=32 --gamma=1 --aug=noaug --version EG3d_v15 --dchannel 6 --resolution 512 --random-swap-prob 0.5 --mirror 1

@@ -70,7 +70,6 @@ def save_image_grid(img, fname, drange, grid_size):
 
 #----------------------------------------------------------------------------
 
-
 def training_loop(
     run_dir                 = '.',      # Output directory.
     training_set_kwargs     = {},       # Options for training set.
@@ -95,7 +94,7 @@ def training_loop(
     ada_target              = None,     # ADA target value. None = fixed p.
     ada_interval            = 4,        # How often to perform ADA adjustment?
     ada_kimg                = 500,      # ADA adjustment speed, measured in how many kimg it takes for p to increase/decrease by one unit.
-    total_kimg              = 27500,    # Total length of the training, measured in thousands of real images.  # 25M
+    total_kimg              = 25000,    # Total length of the training, measured in thousands of real images.  # 25M
     kimg_per_tick           = 4,        # Progress snapshot interval.
     image_snapshot_ticks    = 1,       # How often to save image snapshots? None = disable.
     network_snapshot_ticks  = 50,       # How often to save network snapshots? None = disable.
@@ -139,17 +138,16 @@ def training_loop(
         print('Constructing networks...')
     nerf_init_args = {}
     nerf_init_args['img_size'] = 64
-    nerf_init_args['nerf_noise'] = 1.0
     common_kwargs = dict(c_dim=16, #12,  尝试一下G不用cond
         img_resolution=training_set.resolution, 
         img_channels= 96,
-        backbone_resolution=256,
+        backbone_resolution=128,
         rank=rank,
      )
     common_kwargs_for_D = dict(c_dim=16, #12, 
         img_resolution=training_set.resolution, 
-        # img_channels=6,  # 先尝试使用单张图训练， TODO：高低分辨率都使用单独的判别器
-    )
+        # img_channels=3,  # 先尝试使用单张图训练， TODO：高低分辨率都使用单独的判别器
+     )
     G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
     D = dnnlib.util.construct_class_by_name(**D_kwargs, **common_kwargs_for_D).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
     G_ema = copy.deepcopy(G).eval()
@@ -168,8 +166,9 @@ def training_loop(
         # c = torch.empty([batch_gpu, G.c_dim], device=device)
         c = torch.empty([batch_gpu, 3], device=device)
         meta_data = {'noise_mode': 'const'}
-        img = misc.print_module_summary(G, [z, c], nerf_init_args=nerf_init_args, **meta_data)
-        misc.print_module_summary(D, [img, c])
+        with torch.no_grad():
+            img = misc.print_module_summary(G, [z, c], nerf_init_args=nerf_init_args, **meta_data)
+            misc.print_module_summary(D, [img, c])
 
     # Setup augmentation.
     if rank == 0:
@@ -229,7 +228,8 @@ def training_loop(
         meta_data = {'noise_mode': 'const'}
         total_imgs = []
         for c in grid_c:
-            images = G_ema(z=grid_z, angles=c, nerf_init_args=nerf_init_args, **meta_data)  # b,3,h,w
+            with torch.no_grad():
+                images = G_ema(z=grid_z, angles=c, nerf_init_args=nerf_init_args, **meta_data)  # b,3,h,w
             res = images.shape[-1]
             # save_image_grid(images, os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
             if images.shape[1] == 6:
@@ -283,7 +283,15 @@ def training_loop(
             # all_gen_c = [training_set.get_label(np.random.randint(len(training_set))) for _ in range(len(phases) * batch_size)]
             # all_gen_c = torch.from_numpy(np.stack(all_gen_c)).pin_memory().to(device)
             # all_gen_c = [phase_gen_c.split(batch_gpu) for phase_gen_c in all_gen_c.split(batch_size)]
-
+        nerf_init_args = {}
+        if cur_nimg < 20000 * 1000:
+            nerf_init_args['img_size'] = 64
+        elif cur_img < 24000 * 1000:
+            ratio = (cur_img - 20000000) / 4000000
+            nerf_init_args['img_size'] = int(64 + 64 * ratio)
+        else:
+            nerf_init_args['img_size'] = 128
+        loss.set_nerf_init_args(nerf_init_args)
         # Execute training phases.
         for phase, phase_gen_z in zip(phases, all_gen_z):
             if batch_idx % phase.interval != 0:
@@ -294,22 +302,15 @@ def training_loop(
             # Accumulate gradients.
             phase.opt.zero_grad(set_to_none=True)
             phase.module.requires_grad_(True)
-
-            if cur_nimg < 20000 * 1000:
-                nerf_init_args['img_size'] = 64
-            elif cur_nimg < 24000 * 1000:
-                ratio = 1 - (24000000 - cur_nimg) / 4000000
-                nerf_init_args['img_size'] = int(64 + 64 * ratio)
-            else:
-                nerf_init_args['img_size'] = 128
-            if cur_nimg  < 500000: # swap 
-                nerf_init_args['nerf_noise'] = 1.0 * (500000 - cur_nimg) / 500000
-            else:
-                nerf_init_args['nerf_noise'] = 0
-            loss.set_nerf_init_args(nerf_init_args)
-
             for real_img, real_c, gen_z, gen_c1, gen_c2 in zip(phase_real_img, phase_real_c, phase_gen_z, random_c1, random_c2):
-                loss.accumulate_gradients(phase=phase.name, real_img=real_img, real_c=real_c, gen_z=gen_z, gen_c1=gen_c1, gen_c2=gen_c2, 
+                batchsize_per_gpu = real_img.shape[0]
+                if loss.random_swap_prob > 0.0:
+                    swap_idx = torch.where(torch.rand(size=(batchsize_per_gpu,)) < loss.random_swap_prob)[0]
+                    cond = gen_c1.clone()
+                    cond[swap_idx] = gen_c2[swap_idx]
+                else:
+                    cond = gen_c1
+                loss.accumulate_gradients(phase=phase.name, real_img=real_img, real_c=real_c, gen_z=gen_z, gen_c1=gen_c1, gen_c2=gen_c2, cond=cond,
                 gain=phase.interval, cur_nimg=cur_nimg)
             phase.module.requires_grad_(False)
 
@@ -322,7 +323,7 @@ def training_loop(
                     if num_gpus > 1:
                         torch.distributed.all_reduce(flat)
                         flat /= num_gpus
-                    # misc.nan_to_num(flat, nan=0, posinf=1e5, neginf=-1e5, out=flat)
+                    misc.nan_to_num(flat, nan=0, posinf=1e5, neginf=-1e5, out=flat)
                     grads = flat.split([param.numel() for param in params])
                     for param, grad in zip(params, grads):
                         param.grad = grad.reshape(param.shape)
@@ -373,6 +374,7 @@ def training_loop(
         fields += [f"reserved {training_stats.report0('Resources/peak_gpu_mem_reserved_gb', torch.cuda.max_memory_reserved(device) / 2**30):<6.2f}"]
         torch.cuda.reset_peak_memory_stats()
         fields += [f"augment {training_stats.report0('Progress/augment', float(augment_pipe.p.cpu()) if augment_pipe is not None else 0):.3f}"]
+        fields += [f"nerf size {training_stats.report0('Nerf_size', nerf_init_args['img_size'])}"]
         training_stats.report0('Timing/total_hours', (tick_end_time - start_time) / (60 * 60))
         training_stats.report0('Timing/total_days', (tick_end_time - start_time) / (24 * 60 * 60))
         if rank == 0:
@@ -392,7 +394,8 @@ def training_loop(
             meta_data = {'noise_mode': 'const'}
             total_imgs = []
             for c in grid_c:
-                images = G_ema(z=grid_z, angles=c, nerf_init_args=nerf_init_args, **meta_data)  # b,3,h,w
+                with torch.no_grad():
+                    images = G_ema(z=grid_z, angles=c, nerf_init_args=nerf_init_args, **meta_data)  # b,3,h,w
                 # images = G(z=grid_z, c=c, **meta_data)[:, :3]  # b,3,h,w
                 res = images.shape[-1]
                 if images.shape[1] == 6:

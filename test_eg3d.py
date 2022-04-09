@@ -5,7 +5,6 @@ from training.training_loop_eg3d import save_image_grid
 # from training.EG3d_v8 import Generator
 # from training.EG3d_v9 import Generator
 from training.EG3d_v12 import Generator
-from training.EG3d_v13 import Generator
 import dnnlib
 import legacy
 from torch_utils import misc
@@ -16,7 +15,8 @@ import numpy as np
 
 
 # root = '/home/yangjie08/stylegan3-main/training-runs/EG3d_v12/00003-stylegan2-images1024x1024-gpus8-batch64-gamma1/network-snapshot-004032.pkl'
-root = '/home/yangjie08/stylegan3-main/training-runs/EG3d_v13/00003-stylegan2-images1024x1024-gpus8-batch32-gamma1/network-snapshot-000400.pkl'
+# root = '/home/yangjie08/stylegan3-main/training-runs/EG3d_v13/00003-stylegan2-images1024x1024-gpus8-batch32-gamma1/network-snapshot-000400.pkl'
+root = '/home/yangjie08/stylegan3-main/training-runs/EG3d_v12/00006-stylegan2-images1024x1024-gpus8-batch64-gamma1/network-snapshot-016329.pkl'
 gen_num = 16
 
 
@@ -69,7 +69,7 @@ with dnnlib.util.open_url(root) as f:
     G = legacy.load_network_pkl(f)['G_ema'].to(device) # type: ignore
     G.eval()
 
-device = torch.device('cuda')
+
 grid_size, grid_c = setup_snapshot_image_grid(gen_num, device=torch.device('cuda'))
 grid_z = torch.randn([gen_num, G.z_dim], device=device)
 

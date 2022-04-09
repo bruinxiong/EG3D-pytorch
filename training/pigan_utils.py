@@ -267,7 +267,7 @@ def fancy_integration(rgb_sigma,
         alphas[:, :, :1]), 1 - alphas + 1e-10], -2)  # (b, h x w, num_samples + 1, 1)
     # (b, h x w, num_samples, 1)
     weights = alphas * torch.cumprod(alphas_shifted, -2)[:, :, :-1]
-    weights_sum = weights.sum(2)
+    weights_sum = weights.sum(2)  # 分割图
 
     if last_back:
         weights[:, :, -1] += (1 - weights_sum)

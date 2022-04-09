@@ -142,8 +142,10 @@ def parse_comma_separated_list(s):
 @click.command()
 # Required.
 @click.option('--outdir',       help='Where to save the results', metavar='DIR',                required=True)
-@click.option('--version',      type=click.Choice(['EG3d_v13']), required=True)
-@click.option('--dchannel',     type=click.IntRange(min=3),                                     default=3)
+@click.option('--version',      type=click.Choice(['EG3d_v16', 'EG3d_v17']), required=True)
+@click.option('--dchannel',     type=click.IntRange(min=3),                                     default=3) 
+@click.option('--random-swap-prob',     type=click.FloatRange(min=0),                                     default=0.0) 
+@click.option('--resolution',     type=click.IntRange(min=64),                                   required=True)
 @click.option('--cfg',          help='Base configuration',                                      type=click.Choice(['stylegan3-t', 'stylegan3-r', 'stylegan2']), required=True)
 @click.option('--data',         help='Training data', metavar='[ZIP|DIR]',                      type=str, required=True)
 @click.option('--gpus',         help='Number of GPUs to use', metavar='INT',                    type=click.IntRange(min=1), required=True)
@@ -204,12 +206,6 @@ def main(**kwargs):
     c = dnnlib.EasyDict()  # Main config dict.
     c.G_kwargs = dnnlib.EasyDict(
         class_name=None, z_dim=512, w_dim=512, mapping_kwargs=dnnlib.EasyDict(), 
-        # init_point_kwargs=dnnlib.EasyDict(
-        #     nerf_resolution=128,
-        #     fov=12,
-        #     d_range=(0.88, 1.12),
-        #     # num_steps=36,  # 实际会有2倍
-        # ),
         use_noise=False,  # 关闭noise
         nerf_decoder_kwargs=dnnlib.EasyDict(
            in_c=32,
@@ -224,14 +220,15 @@ def main(**kwargs):
         class_name='torch.optim.Adam', betas=[0, 0.99], eps=1e-8)
     c.D_opt_kwargs = dnnlib.EasyDict(
         class_name='torch.optim.Adam', betas=[0, 0.99], eps=1e-8)
-    c.loss_kwargs = dnnlib.EasyDict(class_name='training.loss_full.StyleGAN2Loss')
+    verions_id = opts.version.split('v')[-1]
+    c.loss_kwargs = dnnlib.EasyDict(class_name=f'training.loss_full_v{verions_id}_2.StyleGAN2Loss', random_swap_prob=opts.random_swap_prob)
     c.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, prefetch_factor=2)
 
     # Training set.
     c.training_set_kwargs, dataset_name = init_dataset_kwargs(
                 data=opts.data, 
-                cond_data='/home/yangjie08/wuchao/hopenet/ffhq_euler.txt',
-                resolution= 256 # 512 # 256, # 256,
+                cond_data='./ffhq_euler.txt',
+                resolution= opts.resolution, # 512 # 256, # 256,
                 )
     if opts.cond and not c.training_set_kwargs.use_labels:
         raise click.ClickException(
@@ -254,7 +251,7 @@ def main(**kwargs):
     #(0.0025 if opts.cfg == 'stylegan2' else 0.0025) if opts.glr is None else opts.glr
     c.D_opt_kwargs.lr = 0.002 #  opts.dlr
     c.metrics = opts.metrics
-    c.total_kimg = 27500  #opts.kimg
+    c.total_kimg = opts.kimg
     c.kimg_per_tick = opts.tick  # 0.1 for debug
     c.image_snapshot_ticks = 1
     c.network_snapshot_ticks = 50 # opts.snap
@@ -340,5 +337,6 @@ if __name__ == "__main__":
 
 # ----------------------------------------------------------------------------
 
+# TODO: 记得指定loss版本
 
-# python train_eg3d_full.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=32 --gamma=1 --mirror=1 --aug=noaug --version EG3d_v13 --dchannel 6
+# python train_eg3d_full.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=32 --gamma=1 --aug=noaug --version EG3d_v17 --dchannel 6 --resolution 512  --mirror 1

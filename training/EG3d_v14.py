@@ -19,7 +19,7 @@ from training.pigan_utils import fancy_integration, sample_pdf
 # 归一化系数从0.15 -> 0.18 
 # blur sigma [1没有使用， 2使用,2还使用了并行采样代码]
 # rgb feature的通道数为3 不是32
-# TODO： 水平翻转； random swap;
+# 水平翻转； random swap; 【第三个实验加入】
 # 基于stylegna2-ada写一版
 
 @persistence.persistent_class
@@ -183,7 +183,7 @@ class Generator(torch.nn.Module):
                 update_emas=True, nerf_init_args={}, cond=None, **synthesis_kwargs
                 ):
         nerf_init_args = {}
-        nerf_init_args['num_steps'] = 48
+        nerf_init_args['num_steps'] = 48 if self.training else 96
         nerf_init_args['img_size'] = 128  # nerf光线数目
         nerf_init_args['fov'] = 13.6
         nerf_init_args['nerf_noise'] = 0 # 去除noise
@@ -196,7 +196,6 @@ class Generator(torch.nn.Module):
         
         if ws is None: 
             # assert not self.training # 只有测试阶段走这条分支
-
             # cond = torch.zeros_like(angles) 
             if cond is None: 
                 cond = angles # for debug 

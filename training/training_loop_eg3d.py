@@ -171,8 +171,9 @@ def training_loop(
         # c = torch.empty([batch_gpu, G.c_dim], device=device)
         c = torch.empty([batch_gpu, 3], device=device)
         meta_data = {'noise_mode': 'const'}
-        img = misc.print_module_summary(G, [z, c], nerf_init_args=nerf_init_args, **meta_data)
-        misc.print_module_summary(D, [img, c])
+        with torch.no_grad():
+            img = misc.print_module_summary(G, [z, c], nerf_init_args=nerf_init_args, **meta_data)
+            misc.print_module_summary(D, [img, c])
 
     # Setup augmentation.
     if rank == 0:
@@ -232,7 +233,8 @@ def training_loop(
         meta_data = {'noise_mode': 'const'}
         total_imgs = []
         for c in grid_c:
-            images = G_ema(z=grid_z, angles=c, nerf_init_args=nerf_init_args, **meta_data)  # b,3,h,w
+            with torch.no_grad():
+                images = G_ema(z=grid_z, angles=c, nerf_init_args=nerf_init_args, **meta_data)  # b,3,h,w
             res = images.shape[-1]
             # save_image_grid(images, os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
             if images.shape[1] == 6:
@@ -311,7 +313,7 @@ def training_loop(
                     if num_gpus > 1:
                         torch.distributed.all_reduce(flat)
                         flat /= num_gpus
-                    # misc.nan_to_num(flat, nan=0, posinf=1e5, neginf=-1e5, out=flat)
+                    misc.nan_to_num(flat, nan=0, posinf=1e5, neginf=-1e5, out=flat)
                     grads = flat.split([param.numel() for param in params])
                     for param, grad in zip(params, grads):
                         param.grad = grad.reshape(param.shape)
@@ -381,7 +383,8 @@ def training_loop(
             meta_data = {'noise_mode': 'const'}
             total_imgs = []
             for c in grid_c:
-                images = G_ema(z=grid_z, angles=c, nerf_init_args=nerf_init_args, **meta_data)  # b,3,h,w
+                with torch.no_grad():
+                    images = G_ema(z=grid_z, angles=c, nerf_init_args=nerf_init_args, **meta_data)  # b,3,h,w
                 # images = G(z=grid_z, c=c, **meta_data)[:, :3]  # b,3,h,w
                 res = images.shape[-1]
                 if images.shape[1] == 6:

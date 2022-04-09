@@ -15,10 +15,10 @@ from training.pigan_utils import fancy_integration, sample_pdf
 # 去除style mixing
 # 简化decoder ； From KevinJiang
 # nosie input for stylegan; 【x】去除nerf的noise
-# 高低分辨率结合
+# 高低分辨率结合 
 # 归一化系数从0.15 -> 0.22 
-
-# TODO： nerf noise越来越小， 水平翻转； random swap;
+# random swap 0.5
+# TODO： nerf noise越来越小， 水平翻转；
 # 基于stylegna2-ada写一版
 
 @persistence.persistent_class
@@ -166,8 +166,6 @@ class Generator(torch.nn.Module):
         # self.nerf_decoder = LightDecoder(**nerf_decoder_kwargs)
         self.nerf_decoder = Decoder(**nerf_decoder_kwargs)
        
-        
-
     def trans_c_to_matrix(self, c):
         bs = c.shape[0]
         c = get_cam2world_matrix(c, device=c.device)  #  [:, :3]  # b, 3, 4
@@ -175,10 +173,10 @@ class Generator(torch.nn.Module):
 
 
     def forward(self, z=None, angles=None, ws=None, truncation_psi=1, truncation_cutoff=None, 
-                update_emas=True, nerf_init_args={}, **synthesis_kwargs
+                update_emas=True, nerf_init_args={}, cond=None, **synthesis_kwargs
                 ):
         nerf_init_args = {}
-        nerf_init_args['num_steps'] = 32
+        nerf_init_args['num_steps'] = 32 if self.training else 96
         nerf_init_args['img_size'] = 64  # nerf光线数目
         nerf_init_args['fov'] = 13.6
         nerf_init_args['nerf_noise'] =1.0 # 去除noise
@@ -190,8 +188,9 @@ class Generator(torch.nn.Module):
     
         
         if ws is None: 
-            assert not self.training # 只有测试阶段走这条分支
-            cond = torch.zeros_like(angles)
+            # assert not self.training # 只有测试阶段走这条分支
+            if cond is None:
+                cond = torch.zeros_like(angles)
             bs = cond.shape[0]
             cond = self.trans_c_to_matrix(cond).reshape(bs, 16)
             ws = self.mapping(z, c=cond, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff, update_emas=update_emas)
@@ -417,6 +416,53 @@ class Generator(torch.nn.Module):
         #### end new importance sampling
         return fine_points, fine_z_vals
 
+    @torch.no_grad()
+    def get_sigma(self, z=None, truncation_psi=1, truncation_cutoff=None, 
+                update_emas=True, nerf_init_args={}, **synthesis_kwargs
+                ):
+        nerf_init_args = {}
+        nerf_init_args['num_steps'] = 32
+        nerf_init_args['img_size'] = 64  # nerf光线数目
+        nerf_init_args['fov'] = 13.6
+        nerf_init_args['nerf_noise'] =1.0 # 去除noise
+        nerf_init_args['ray_start'] = 0.88
+        nerf_init_args['ray_end'] = 1.12
+        img_size = nerf_init_args['img_size']
+        self.nerf_resolution = img_size
+        num_steps = nerf_init_args['num_steps']
+    
+        grid_z = z
+        bs = grid_z.shape[0]
+        device = grid_z.device
+        cond = self.trans_c_to_matrix(torch.zeros(bs, 3, device=grid_z.device)).reshape(bs, 16)
+        ws = self.mapping(grid_z, c=cond, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff, update_emas=update_emas)
+        # print(ws.keys())
+        backbone_feats = self.synthesis(ws[:, :self.synthesis.num_ws], update_emas=update_emas, **synthesis_kwargs)  # b,32*3,128,128
+    
+        feat_xy, feat_yz, feat_xz = backbone_feats.chunk(3, dim=1)  # b, 32, 128, 128
+      
+
+        x, y, z = torch.meshgrid(torch.linspace(-1, 1, img_size, device=device),
+                          torch.linspace(1, -1, img_size, device=device), 
+                          torch.linspace(-1, 1, num_steps, device=device))
+        transformed_points = torch.stack([x, y, z], dim=-1) # 64x64x64x3
+        transformed_points = transformed_points.view(img_size*img_size, num_steps, 3).unsqueeze(0).expand(bs, -1, -1, -1) # bs, n, s, c
+
+         # 插值
+        nerf_feat = self.bilinear_sample_tri_plane(
+            transformed_points,
+            feat_xy, feat_yz, feat_xz, 
+            )  # b*n,c,h,w
+        nerf_feat = self.nerf_decoder(nerf_feat)  
+
+        volume_channel = nerf_feat.shape[1]
+        h = w = img_size
+        nerf_feat = nerf_feat.reshape(bs, num_steps, volume_channel, h, w).permute(0, 3,4,1,2).\
+                reshape(bs, h*w, num_steps, volume_channel) # b, hw, n, c+1
+        sigmas = nerf_feat[..., -1]
+        sigmas = sigmas.view(bs, img_size, img_size, num_steps)
+        sigmas = nerf_feat[..., -1]
+        return sigmas
 
 
 
