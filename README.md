@@ -20,6 +20,8 @@ Note that please modify the arg "--data" by your FFHQ dataset.
 
 > python train_eg3d_full.py --outdir=training-runs --cfg=stylegan2 --data=/dataset/FFHQ/images1024x1024 --gpus=8 --batch=32 --gamma=1 --aug=noaug --version EG3d_v16 --dchannel 3 --resolution 512  --mirror 1
 
+the generated video will be at "video_example.mp4"
+
 # How to Test
 I provide a pretrained model, which you can find [here](https://drive.google.com/file/d/1seSKSRM8EwgQdXt8siNWJcUsU-e6cUKG/view?usp=sharing)
 
